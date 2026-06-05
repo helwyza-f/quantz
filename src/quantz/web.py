@@ -1034,7 +1034,24 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
                     )
             series[symbol] = history[-candle_count:]
             current_tick = {}
-            if tick is not None:
+            ea_tick = self._latest_tick_for_symbol(symbol)
+            if ea_tick:
+                current_tick = {
+                    "bid": ea_tick.get("bid", ""),
+                    "ask": ea_tick.get("ask", ""),
+                    "mid": ea_tick.get("mid", ""),
+                    "spread_points": ea_tick.get("spread_points", ""),
+                    "time": ea_tick.get("tick_time", ""),
+                    "source": ea_tick.get("source", "ea_socket"),
+                }
+                if history:
+                    mid = float(ea_tick.get("mid", 0.0) or 0.0)
+                    if mid > 0:
+                        history[-1]["close"] = round(mid, digits)
+                        history[-1]["high"] = round(max(float(history[-1].get("high", mid) or mid), mid), digits)
+                        history[-1]["low"] = round(min(float(history[-1].get("low", mid) or mid), mid), digits)
+                    series[symbol] = history[-candle_count:]
+            elif tick is not None:
                 bid = float(getattr(tick, "bid", 0.0) or 0.0)
                 ask = float(getattr(tick, "ask", 0.0) or 0.0)
                 spread_points = round((ask - bid) / point, 2) if point > 0 else 0.0
@@ -1044,6 +1061,7 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
                     "mid": round((bid + ask) / 2, digits),
                     "spread_points": spread_points,
                     "time": int(getattr(tick, "time", 0) or 0),
+                    "source": "mt5_python",
                 }
             overlays[symbol] = {
                 "indicators": self._market_indicators(history[-candle_count:]),
@@ -1061,8 +1079,11 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
                 ],
             }
 
+        chart_source = "mt5_ohlc_history"
+        if any((overlay.get("current_tick") or {}).get("source") == "ea_socket" for overlay in overlays.values()):
+            chart_source = "mt5_ohlc_history + ea_socket_live_tick"
         return {
-            "source": "mt5_ohlc_history",
+            "source": chart_source,
             "status": "connected",
             "config": config_name,
             "timeframe": timeframe_label,
@@ -1077,7 +1098,7 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
         try:
             payload = self._read_live_market()
             if payload.get("status") == "connected":
-                payload["recent_ticks"] = self._record_live_ticks(payload.get("ticks", []))
+                payload["recent_ticks"] = self._recent_ticks()
             else:
                 payload["recent_ticks"] = self._recent_ticks()
             return payload
@@ -1168,13 +1189,6 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
 
     def _tick_collector_target(self, interval_seconds: float, stop_event: threading.Event) -> None:
         while not stop_event.is_set():
-            try:
-                if not self._ea_socket_active():
-                    payload = self._read_live_market()
-                    if payload.get("status") == "connected":
-                        self._record_live_ticks(payload.get("ticks", []), source="python_polling")
-            except Exception:
-                pass
             if stop_event.wait(interval_seconds):
                 break
 
@@ -1346,10 +1360,10 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
         ea_active = self._ea_socket_active()
         return {
             "running": running,
-            "polling_active": running and not ea_active,
-            "polling_suppressed_by_ea": ea_active,
-            "active_source": "ea_socket" if ea_active else "python_polling",
-            "active_source_label": self._tick_source_label("ea_socket" if ea_active else "python_polling"),
+            "polling_active": False,
+            "polling_suppressed_by_ea": True,
+            "active_source": "ea_socket",
+            "active_source_label": self._tick_source_label("ea_socket"),
             "last_ea_tick_at": self.last_ea_tick_at.isoformat() if self.last_ea_tick_at else "",
             "last_ea_tick_at_display": self._format_local_time(self.last_ea_tick_at.isoformat()) if self.last_ea_tick_at else "",
             "thread": self.tick_collector_thread.name if self.tick_collector_thread else "",
@@ -1559,6 +1573,13 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
     def _recent_ticks(self, limit: int = 50) -> list[dict[str, Any]]:
         with self.tick_tape_lock:
             return self._recent_ticks_unlocked(limit=limit)
+
+    def _latest_tick_for_symbol(self, symbol: str) -> dict[str, Any]:
+        wanted = str(symbol).upper()
+        for tick in self._recent_ticks(limit=250):
+            if str(tick.get("symbol", "")).upper() == wanted and str(tick.get("source", "")) == "ea_socket":
+                return tick
+        return {}
 
     def _recent_ticks_unlocked(self, limit: int = 50) -> list[dict[str, Any]]:
         if not self.tick_tape_path.exists():
@@ -2702,6 +2723,7 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
   let marketCandleLimit = 80;
   let marketTimeframe = "H1";
   let tickTapeLimit = 120;
+  let controlChartState = null;
 
   function clear(node) {
     while (node.firstChild) node.removeChild(node.firstChild);
@@ -3534,6 +3556,7 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
       ["Spread", `${summary.spread_min || 0} / ${summary.spread_max || 0}`],
     ]);
     tickTapeChart("control-tick-chart", payload.ticks || []);
+    updateControlChartFromTick(tick);
     marketStrip("control-agent-strip", [
       ["Monitor", monitor.status || "stopped"],
       ["Config", agent.config || ""],
@@ -3588,6 +3611,7 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
 
   function renderControlChart(chart) {
     if (!$("control-market-candles")) return;
+    controlChartState = chart;
     const select = $("control-symbol-select");
     const selected = (select && select.value) || (chart.symbols || [])[0] || "";
     const count = ((chart.series || {})[selected] || []).length;
@@ -3596,6 +3620,44 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
     if ($("control-candle-count")) $("control-candle-count").textContent = count;
     if ($("control-timeframe-label")) $("control-timeframe-label").textContent = chart.timeframe || "";
     candlestickChart("control-market-candles", selected, (chart.series || {})[selected] || [], (chart.overlays || {})[selected] || {});
+  }
+
+  function updateControlChartFromTick(tick) {
+    if (!controlChartState || !tick || !tick.symbol || !$("control-market-candles")) return;
+    const select = $("control-symbol-select");
+    const selected = (select && select.value) || tick.symbol;
+    if (selected !== tick.symbol) return;
+    const series = controlChartState.series || {};
+    const overlays = controlChartState.overlays || {};
+    const candles = (series[selected] || []).map((row) => ({ ...row }));
+    if (!candles.length) return;
+    const bid = Number(tick.bid || 0);
+    const ask = Number(tick.ask || 0);
+    const mid = Number(tick.mid || ((bid + ask) / 2));
+    if (!Number.isFinite(mid) || mid <= 0) return;
+    const last = { ...candles[candles.length - 1] };
+    const high = Number(last.high ?? last.close ?? mid);
+    const low = Number(last.low ?? last.close ?? mid);
+    last.close = mid;
+    last.high = Math.max(high, mid, bid, ask);
+    last.low = Math.min(low, mid, bid, ask);
+    last.live_source = tick.source || "ea_socket";
+    candles[candles.length - 1] = last;
+    series[selected] = candles;
+    overlays[selected] = {
+      ...(overlays[selected] || {}),
+      current_tick: {
+        bid,
+        ask,
+        mid,
+        spread_points: tick.spread_points,
+        time: tick.tick_time,
+        source: tick.source || "ea_socket",
+      },
+    };
+    controlChartState = { ...controlChartState, source: "mt5_ohlc_history + ea_socket_live_tick", series, overlays };
+    if ($("control-chart-source")) $("control-chart-source").textContent = controlChartState.source;
+    candlestickChart("control-market-candles", selected, candles, overlays[selected] || {});
   }
 
   async function refreshControlChart() {
