@@ -31,12 +31,13 @@ class TradingAgent:
     def run_once(self, context: AgentContext) -> ExperienceRecord:
         closed_positions = self.paper_portfolio.reconcile(context.market) if self.paper_portfolio else []
         if self.paper_portfolio:
+            external_open_positions = int(context.constraints.get("external_open_symbol_positions", 0) or 0)
             context = replace(
                 context,
                 constraints={
                     **context.constraints,
                     "block_when_symbol_open": True,
-                    "open_symbol_positions": self.paper_portfolio.open_count(context.market.symbol),
+                    "open_symbol_positions": self.paper_portfolio.open_count(context.market.symbol) + external_open_positions,
                 },
             )
         if self.analyst:

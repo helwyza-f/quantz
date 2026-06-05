@@ -444,7 +444,11 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
               </section>
               <section class="control-lower">
                 <div class="control-panel">
-                  <h2>Open Positions</h2>
+                  <h2>MT5 Positions</h2>
+                  <div id="control-mt5-open-positions">{self._mt5_positions_table(agent.get("mt5_open_positions", []))}</div>
+                </div>
+                <div class="control-panel">
+                  <h2>Paper Positions</h2>
                   <div id="control-open-positions">{self._positions_table(agent.get("open_positions", []))}</div>
                 </div>
                 <div class="control-panel">
@@ -484,7 +488,11 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
               <div id="agent-decisions-table">{self._decisions_table(console["recent_decisions"])}</div>
             </section>
             <section>
-              <h2>Open Positions</h2>
+              <h2>MT5 Positions</h2>
+              <div id="agent-mt5-open-positions">{self._mt5_positions_table(console.get("mt5_open_positions", []))}</div>
+            </section>
+            <section>
+              <h2>Paper Positions</h2>
               <div id="agent-open-positions">{self._positions_table(console["open_positions"])}</div>
             </section>
             <section>
@@ -589,6 +597,8 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
     .market-label {{ fill:#9aa8ba; font-size:12px; }}
     .market-title {{ fill:#e8eef6; font-weight:760; font-size:15px; }}
     .market-signal-label {{ fill:#0f1720; font-size:10px; font-weight:800; }}
+    .market-decision-title {{ fill:#e5eef8; font-size:12px; font-weight:800; }}
+    .market-decision-reason {{ fill:#a8bfd5; font-size:10px; }}
     .market-ma-fast {{ fill:none; stroke:#f2c94c; stroke-width:2.2; }}
     .market-ma-slow {{ fill:none; stroke:#56ccf2; stroke-width:2.2; }}
     .market-atr {{ fill:rgba(86,204,242,0.10); stroke:#335f72; stroke-width:1; }}
@@ -718,6 +728,11 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
         memory_path = self._rooted_path(getattr(settings, "memory_path", "data/experience.jsonl"))
         paper_state = self._read_json(paper_state_path)
         open_positions = [self._position_row(position) for position in paper_state.get("open_positions", [])]
+        mt5_positions = (
+            self._mt5_open_positions(getattr(settings, "symbols", []))
+            if getattr(settings, "market_source", "demo") == "mt5"
+            else []
+        )
         closed_positions = [self._close_row(position) for position in paper_state.get("closed_positions", [])]
         experiences = self._read_jsonl(memory_path)
         recent_decisions = [self._decision_row(row) for row in experiences[-12:]][::-1]
@@ -737,6 +752,8 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
             "estimated_pnl": round(self._estimated_pnl(total_r, settings_to_dict(settings)), 2),
             "win_rate": round(wins / (wins + losses), 4) if wins + losses else 0.0,
             "open_positions": open_positions,
+            "mt5_open_positions": mt5_positions,
+            "mt5_open_position_count": len(mt5_positions),
             "recent_closes": closed_positions[-10:][::-1],
             "recent_decisions": recent_decisions,
         }
@@ -750,6 +767,11 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
         decisions = [self._decision_row(row) for row in experiences[-20:]][::-1]
         latest = decisions[0] if decisions else {}
         open_positions = [self._position_row(position) for position in paper_state.get("open_positions", [])]
+        mt5_positions = (
+            self._mt5_open_positions(getattr(settings, "symbols", []))
+            if getattr(settings, "market_source", "demo") == "mt5"
+            else []
+        )
         closed_positions = [self._close_row(position) for position in paper_state.get("closed_positions", [])]
         total_r = sum(float(position.get("r_multiple", 0.0) or 0.0) for position in closed_positions)
         wins = sum(1 for position in closed_positions if float(position.get("r_multiple", 0.0) or 0.0) > 0)
@@ -767,6 +789,8 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
             "recent_decisions": decisions,
             "open_positions": open_positions,
             "open_position_count": len(open_positions),
+            "mt5_open_positions": mt5_positions,
+            "mt5_open_position_count": len(mt5_positions),
             "recent_closes": closed_positions[-10:][::-1],
             "closed_position_count": len(closed_positions),
             "paper_total_r": round(total_r, 4),
@@ -799,6 +823,8 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
                 "closed_position_count": agent.get("closed_position_count", 0),
                 "paper_total_r": agent.get("paper_total_r", 0),
                 "win_rate": agent.get("win_rate", 0),
+                "mt5_open_position_count": agent.get("mt5_open_position_count", 0),
+                "mt5_open_positions": agent.get("mt5_open_positions", []),
                 "recent_closes": agent.get("recent_closes", []),
             },
         }
@@ -1659,6 +1685,7 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
             ("Symbols", ", ".join(operations.get("symbols", []))),
             ("Experiences", operations.get("experience_count", 0)),
             ("Open Positions", operations.get("open_position_count", 0)),
+            ("MT5 Open", operations.get("mt5_open_position_count", 0)),
             ("Closed Positions", operations.get("closed_position_count", 0)),
             ("Paper PnL (R)", operations.get("paper_total_r", 0)),
             ("Est. PnL", self._money(operations.get("estimated_pnl", 0))),
@@ -1681,6 +1708,7 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
             ("Mode", console.get("mode", "")),
             ("Market", console.get("market_source", "")),
             ("Symbol", ", ".join(console.get("symbols", []))),
+            ("MT5 Open", console.get("mt5_open_position_count", 0)),
             ("Latest", latest.get("action", "none")),
             ("Risk", latest.get("risk_status", "")),
         ]
@@ -1835,6 +1863,76 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
                 "</tr>"
             )
         return "<table><thead><tr><th>Symbol</th><th>Side</th><th>Lot</th><th>Entry</th><th>SL</th><th>TP</th><th>Opened</th></tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
+
+    def _mt5_positions_table(self, positions: list[dict[str, Any]]) -> str:
+        if not positions:
+            return "<p>No open MT5 positions.</p>"
+        rows = []
+        for position in positions:
+            rows.append(
+                "<tr>"
+                f"<td>{self._escape(position.get('ticket', ''))}</td>"
+                f"<td>{self._escape(position.get('symbol', ''))}</td>"
+                f"<td>{self._escape(position.get('side', ''))}</td>"
+                f"<td>{self._escape(position.get('volume', ''))}</td>"
+                f"<td>{self._escape(position.get('entry_price', ''))}</td>"
+                f"<td>{self._escape(position.get('stop_loss', ''))}</td>"
+                f"<td>{self._escape(position.get('take_profit', ''))}</td>"
+                f"<td>{self._escape(position.get('profit', ''))}</td>"
+                f"<td>{self._escape(position.get('opened_at', ''))}</td>"
+                "</tr>"
+            )
+        return "<table><thead><tr><th>Ticket</th><th>Symbol</th><th>Side</th><th>Lot</th><th>Entry</th><th>SL</th><th>TP</th><th>Profit</th><th>Opened</th></tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
+
+    def _mt5_open_positions(self, symbols: list[str]) -> list[dict[str, Any]]:
+        wanted = {symbol.upper() for symbol in symbols}
+        try:
+            connection = Mt5Connection()
+            connection.initialize()
+            positions = connection.mt5.positions_get() or []
+        except Exception:
+            return []
+
+        rows = []
+        for position in positions:
+            raw = position._asdict() if hasattr(position, "_asdict") else {
+                key: getattr(position, key, "")
+                for key in [
+                    "ticket",
+                    "symbol",
+                    "type",
+                    "volume",
+                    "price_open",
+                    "sl",
+                    "tp",
+                    "profit",
+                    "time",
+                ]
+            }
+            symbol = str(raw.get("symbol", "")).upper()
+            if wanted and symbol not in wanted:
+                continue
+            try:
+                side = "buy" if int(raw.get("type", -1)) == 0 else "sell" if int(raw.get("type", -1)) == 1 else str(raw.get("type", ""))
+            except (TypeError, ValueError):
+                side = str(raw.get("type", ""))
+            opened_raw = raw.get("time", "")
+            rows.append(
+                {
+                    "source": "mt5",
+                    "ticket": raw.get("ticket", ""),
+                    "symbol": symbol,
+                    "side": side,
+                    "volume": raw.get("volume", ""),
+                    "entry_price": raw.get("price_open", raw.get("price", "")),
+                    "stop_loss": raw.get("sl", ""),
+                    "take_profit": raw.get("tp", ""),
+                    "profit": raw.get("profit", ""),
+                    "opened_at": self._format_local_time(opened_raw),
+                    "opened_at_raw": opened_raw,
+                }
+            )
+        return rows
 
     def _decisions_table(self, decisions: list[dict[str, Any]]) -> str:
         if not decisions:
@@ -2016,6 +2114,11 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
         indicators = list(overlays.get("indicators", []))[-len(selected) :]
         highs = [float(candle.get("high", candle.get("close", 0.0)) or 0.0) for candle in selected]
         lows = [float(candle.get("low", candle.get("close", 0.0)) or 0.0) for candle in selected]
+        current_tick = overlays.get("current_tick", {})
+        for key in ("bid", "ask", "mid"):
+            if current_tick.get(key) is not None:
+                highs.append(float(current_tick[key]))
+                lows.append(float(current_tick[key]))
         for indicator in indicators:
             for key in ("ma_fast", "ma_slow", "atr_upper", "atr_lower"):
                 if indicator.get(key) is not None:
@@ -2208,6 +2311,16 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
                 title = f"{action} {side} conf={signal.get('confidence')} risk={signal.get('risk_status')}"
                 nodes.append(f'<circle cx="{x:.2f}" cy="{y:.2f}" r="8" fill="{color}"><title>{self._escape(title)}</title></circle>')
                 nodes.append(f'<text x="{x - 3:.2f}" y="{y + 4:.2f}" fill="#0f1720" font-size="10" font-weight="800">{label}</text>')
+            latest_signal = display_signals[-1]
+            latest_action = str(latest_signal.get("action", "none") or "none")
+            latest_risk = str(latest_signal.get("risk_status", "") or "")
+            latest_confidence = latest_signal.get("confidence", "")
+            latest_reasons = list(latest_signal.get("reason_codes", []))
+            latest_reason = str(latest_reasons[0]) if latest_reasons else "no_reason"
+            badge_color = "#f2c94c" if latest_action == "hold" else "#1fbf86" if str(latest_signal.get("side", "")) != "sell" else "#e05f5f"
+            nodes.append(f'<rect x="{left + 178}" y="{top - 34}" width="390" height="34" rx="6" fill="#111827" stroke="{badge_color}" stroke-width="1.5"></rect>')
+            nodes.append(f'<text x="{left + 192}" y="{top - 14}" fill="#e5eef8" font-size="12" font-weight="800">Latest Decision: {self._escape(latest_action)} conf {self._escape(latest_confidence)} risk {self._escape(latest_risk)}</text>')
+            nodes.append(f'<text x="{left + 192}" y="{top - 3}" fill="#a8bfd5" font-size="10">{self._escape(latest_reason[:48])}</text>')
         closes = overlays.get("closed_positions", [])[-12:]
         if closes:
             step = max(1, (right_x - left) / max(len(closes), 1))
@@ -2658,6 +2771,10 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
         symbol = str(tick.get("symbol", settings.symbols[0])).upper()
         market = self._market_snapshot_from_stream_tick(settings, tick)
         account = self._account_state_for_stream_agent(settings)
+        mt5_positions = self._mt5_open_positions(getattr(settings, "symbols", []))
+        external_open_symbol_positions = sum(
+            1 for position in mt5_positions if str(position.get("symbol", "")).upper() == symbol
+        )
         agent = TradingAgent(
             planner=VariableDrivenPlanner(),
             risk_governor=RiskGovernor(RiskConfig()),
@@ -2674,6 +2791,8 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
                     **settings.constraints,
                     "stream_source": "ea_socket",
                     "stream_symbol": symbol,
+                    "external_open_symbol_positions": external_open_symbol_positions,
+                    "external_open_positions_source": "mt5",
                 },
             )
         )
@@ -3436,6 +3555,24 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
         svg.append(circle);
         addSvgText(svg, label, x - 3, y + 4, "market-signal-label");
       });
+      const latestSignal = displaySignals[displaySignals.length - 1];
+      const latestAction = String(latestSignal.action || "none");
+      const latestRisk = String(latestSignal.risk_status || "");
+      const latestConfidence = latestSignal.confidence ?? "";
+      const latestReason = String((latestSignal.reason_codes || [])[0] || "no_reason").slice(0, 48);
+      const badgeColor = latestAction === "hold" ? "#f2c94c" : String(latestSignal.side || "") === "sell" ? "#e05f5f" : "#1fbf86";
+      const badge = svgEl("rect");
+      badge.setAttribute("x", left + 178);
+      badge.setAttribute("y", top - 34);
+      badge.setAttribute("width", 390);
+      badge.setAttribute("height", 34);
+      badge.setAttribute("rx", 6);
+      badge.setAttribute("fill", "#111827");
+      badge.setAttribute("stroke", badgeColor);
+      badge.setAttribute("stroke-width", "1.5");
+      svg.append(badge);
+      addSvgText(svg, `Latest Decision: ${latestAction} conf ${latestConfidence} risk ${latestRisk}`, left + 192, top - 14, "market-decision-title");
+      addSvgText(svg, latestReason, left + 192, top - 3, "market-decision-reason");
     }
     const closes = (overlays.closed_positions || []).slice(-12);
     if (closes.length) {
@@ -3487,6 +3624,7 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
       ["Symbols", (operations.symbols || []).join(", ")],
       ["Experiences", operations.experience_count || 0],
       ["Open Positions", operations.open_position_count || 0],
+      ["MT5 Open", operations.mt5_open_position_count || 0],
       ["Closed Positions", operations.closed_position_count || 0],
       ["Paper PnL (R)", operations.paper_total_r || 0],
       ["Est. PnL", money(operations.estimated_pnl)],
@@ -3627,6 +3765,7 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
       ["Mode", consoleState.mode || ""],
       ["Market", consoleState.market_source || ""],
       ["Symbol", (consoleState.symbols || []).join(", ")],
+      ["MT5 Open", consoleState.mt5_open_position_count || 0],
       ["Latest", latest.action || "none"],
       ["Risk", latest.risk_status || ""],
     ]);
@@ -3649,6 +3788,17 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
       { label: "TP", value: "take_profit" },
       { label: "Opened", value: "opened_at" },
     ], consoleState.open_positions, "No open paper positions.");
+    table("agent-mt5-open-positions", [
+      { label: "Ticket", value: "ticket" },
+      { label: "Symbol", value: "symbol" },
+      { label: "Side", value: "side" },
+      { label: "Lot", value: "volume" },
+      { label: "Entry", value: "entry_price" },
+      { label: "SL", value: "stop_loss" },
+      { label: "TP", value: "take_profit" },
+      { label: "Profit", value: "profit" },
+      { label: "Opened", value: "opened_at" },
+    ], consoleState.mt5_open_positions, "No open MT5 positions.");
     table("agent-events-table", [
       { label: "Time", value: "timestamp" },
       { label: "Iter", value: "iteration" },
@@ -3788,6 +3938,7 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
       ["Mode", agent.mode || ""],
       ["Market", agent.market_source || ""],
       ["Symbol", (agent.symbols || []).join(", ")],
+      ["MT5 Open", agent.mt5_open_position_count || 0],
       ["Latest", latest.action || "none"],
       ["Risk", latest.risk_status || ""],
     ]);
@@ -3801,6 +3952,17 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
       { label: "TP", value: "take_profit" },
       { label: "Opened", value: "opened_at" },
     ], agent.open_positions || [], "No open paper positions.");
+    table("control-mt5-open-positions", [
+      { label: "Ticket", value: "ticket" },
+      { label: "Symbol", value: "symbol" },
+      { label: "Side", value: "side" },
+      { label: "Lot", value: "volume" },
+      { label: "Entry", value: "entry_price" },
+      { label: "SL", value: "stop_loss" },
+      { label: "TP", value: "take_profit" },
+      { label: "Profit", value: "profit" },
+      { label: "Opened", value: "opened_at" },
+    ], agent.mt5_open_positions || [], "No open MT5 positions.");
     table("control-history", [
       { label: "Time", value: "timestamp" },
       { label: "Symbol", value: "symbol" },

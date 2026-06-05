@@ -70,6 +70,31 @@ def test_paper_agent_blocks_duplicate_symbol_position(tmp_path):
     assert "symbol_already_has_open_paper_position" in second.risk.reasons
 
 
+def test_paper_agent_counts_external_symbol_position(tmp_path):
+    context = AgentContext(
+        market=DemoMarketFeed().snapshot("XAUUSD"),
+        account=DemoAccountFeed().state(),
+        constraints={
+            "default_risk_percent": 0.25,
+            "min_confidence": 0.65,
+            "external_open_symbol_positions": 1,
+        },
+    )
+    agent = TradingAgent(
+        planner=VariableDrivenPlanner(),
+        risk_governor=RiskGovernor(),
+        broker=PaperBrokerAdapter(),
+        memory=JsonlExperienceStore(tmp_path / "experience.jsonl"),
+        paper_portfolio=PaperPortfolio(tmp_path / "paper-state.json"),
+    )
+
+    record = agent.run_once(context)
+
+    assert record.execution is None
+    assert record.risk.status == DecisionStatus.REJECTED
+    assert "symbol_already_has_open_paper_position" in record.risk.reasons
+
+
 def test_agent_records_analyst_metadata(tmp_path):
     context = AgentContext(
         market=DemoMarketFeed().snapshot("XAUUSD"),

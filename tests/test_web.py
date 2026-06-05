@@ -238,6 +238,19 @@ def test_web_control_page_unifies_market_agent_and_sse(tmp_path):
     )
 
     app = WebApp(tmp_path)
+    app._mt5_open_positions = lambda _symbols: [
+        {
+            "ticket": 123,
+            "symbol": "XAUUSD",
+            "side": "buy",
+            "volume": 0.01,
+            "entry_price": 4400.0,
+            "stop_loss": 4390.0,
+            "take_profit": 4420.0,
+            "profit": 1.25,
+            "opened_at": "05 Jun 2026 20:00:00 WIB",
+        }
+    ]
     app._record_live_ticks(
         [{"symbol": "XAUUSD", "bid": 100.1, "ask": 100.2, "mid": 100.15, "spread_points": 10, "tick_time": 1780650000}]
     )
@@ -252,6 +265,9 @@ def test_web_control_page_unifies_market_agent_and_sse(tmp_path):
     assert payload["stream"]["browser_polling"] is False
     assert payload["live"]["latest_tick"]["symbol"] == "XAUUSD"
     assert payload["agent"]["latest_decision"]["action"] == "hold"
+    assert "MT5 Positions" in html
+    assert payload["agent"]["mt5_open_position_count"] == 1
+    assert payload["agent"]["mt5_open_positions"][0]["ticket"] == 123
 
 
 def test_web_pnl_summary_groups_symbol_performance_and_reasons(tmp_path):
@@ -812,6 +828,33 @@ def test_web_market_chart_overlays_latest_ea_socket_tick(tmp_path, monkeypatch):
     assert current_tick["bid"] == 105.1
     assert latest_candle["close"] == 105.2
     assert latest_candle["high"] == 105.2
+
+
+def test_web_candlestick_chart_shows_latest_agent_decision(tmp_path):
+    html = WebApp(tmp_path)._candlestick_chart(
+        "XAUUSD",
+        [
+            {"step": 1, "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5},
+            {"step": 2, "open": 100.5, "high": 102.0, "low": 100.0, "close": 101.5},
+        ],
+        {
+            "signals": [
+                {
+                    "action": "hold",
+                    "side": "",
+                    "confidence": 0.8045,
+                    "risk_status": "rejected",
+                    "reason_codes": ["spread_too_wide"],
+                }
+            ],
+            "current_tick": {"bid": 101.4, "ask": 101.6, "mid": 101.5},
+        },
+    )
+
+    assert "Latest Decision: hold" in html
+    assert "spread_too_wide" in html
+    assert "BID 101.400" in html
+    assert "ASK 101.600" in html
 
 
 def test_web_stream_agent_runs_from_new_ea_socket_tick(tmp_path, monkeypatch):
