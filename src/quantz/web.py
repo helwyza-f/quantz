@@ -459,7 +459,7 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
                   <h2>Paper Positions</h2>
                   <div id="control-open-positions">{self._positions_table(agent.get("open_positions", []))}</div>
                 </div>
-                <div class="control-panel">
+                <div class="control-panel wide-panel">
                   <h2>History</h2>
                   <div id="control-history">{self._decisions_table(agent.get("recent_decisions", []))}</div>
                 </div>
@@ -626,6 +626,14 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
     .decision-card strong {{ display:block; margin-top:4px; font-size:15px; overflow-wrap:anywhere; }}
     .decision-reasons {{ grid-column:1 / -1; }}
     .decision-reasons ul {{ margin:8px 0 0; padding-left:18px; }}
+    .decision-history {{ display:grid; gap:10px; }}
+    .decision-history-item {{ border:1px solid var(--line); border-radius:8px; padding:12px; background:#fff; min-width:0; }}
+    .decision-history-head {{ display:grid; grid-template-columns:1.2fr 0.75fr 0.75fr 0.75fr 0.9fr; gap:8px; align-items:start; }}
+    .decision-history-head span,.decision-history-reasons span {{ display:block; color:var(--muted); font-size:11px; font-weight:750; }}
+    .decision-history-head strong {{ display:block; margin-top:2px; font-size:14px; overflow-wrap:anywhere; }}
+    .decision-history-reasons {{ margin-top:10px; padding-top:10px; border-top:1px solid var(--line); }}
+    .decision-history-reasons ul {{ margin:6px 0 0; padding-left:18px; }}
+    .decision-history-reasons li {{ margin:3px 0; overflow-wrap:anywhere; }}
     .market-legend {{ display:flex; flex-wrap:wrap; gap:14px; align-items:center; margin:0 0 10px; color:var(--muted); font-size:12px; }}
     .market-legend span {{ display:inline-flex; align-items:center; gap:6px; }}
     .market-legend i {{ width:18px; height:3px; display:inline-block; border-radius:3px; background:#9aa8ba; }}
@@ -645,6 +653,7 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
     .control-side {{ display:grid; gap:14px; }}
     .control-lower {{ display:grid; grid-template-columns:1fr 1fr; gap:14px; background:transparent; border:0; padding:0; }}
     .control-lower .control-panel {{ overflow-x:auto; }}
+    .control-lower .wide-panel {{ grid-column:1 / -1; }}
     .control-toolbar {{ grid-template-columns:2fr 1.1fr 0.75fr auto auto auto; }}
     .compact-strip {{ grid-template-columns:repeat(4,minmax(0,1fr)); }}
     .control-status-list {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; margin-bottom:10px; }}
@@ -656,7 +665,7 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
     #control-tick-chart svg {{ display:block; width:100%; min-width:360px; }}
     #control-decision-card .decision-card {{ grid-template-columns:1fr 1fr; }}
     #control-agent-controls .market-toolbar {{ grid-template-columns:1fr 0.8fr 0.8fr auto; }}
-    @media (max-width:760px) {{ main {{ padding:16px; }} .metrics,.form-grid,.market-toolbar,.market-strip,.decision-card,.control-shell,.control-lower,.control-status-list {{ grid-template-columns:1fr; }} nav {{ padding:0 16px; }} nav div {{ overflow-x:auto; white-space:nowrap; }} }}
+    @media (max-width:760px) {{ main {{ padding:16px; }} .metrics,.form-grid,.market-toolbar,.market-strip,.decision-card,.decision-history-head,.control-shell,.control-lower,.control-status-list {{ grid-template-columns:1fr; }} nav {{ padding:0 16px; }} nav div {{ overflow-x:auto; white-space:nowrap; }} }}
     @media (max-width:980px) {{ .market-toolbar,.control-toolbar {{ grid-template-columns:1fr 1fr; }} .market-strip,.compact-strip {{ grid-template-columns:repeat(2,minmax(0,1fr)); }} .control-shell,.control-lower {{ grid-template-columns:1fr; }} }}
     @media (max-width:980px) {{ .chart-grid {{ grid-template-columns:1fr; }} }}
   </style>
@@ -1974,19 +1983,24 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
             return "<p>No decisions recorded yet.</p>"
         rows = []
         for decision in decisions:
+            reasons = list(decision.get("reasons", []))
+            reason_items = "".join(f"<li>{self._escape(reason)}</li>" for reason in reasons) if reasons else "<li>none</li>"
+            execution = decision.get("execution") or "not sent"
             rows.append(
-                "<tr>"
-                f"<td>{self._escape(decision.get('timestamp', ''))}</td>"
-                f"<td>{self._escape(decision.get('symbol', ''))}</td>"
-                f"<td>{self._escape(decision.get('action', ''))}</td>"
-                f"<td>{self._escape(decision.get('confidence', ''))}</td>"
-                f"<td>{self._escape(decision.get('risk_status', ''))}</td>"
-                f"<td>{self._escape(decision.get('analyst_model', ''))}</td>"
-                f"<td>{self._escape(decision.get('execution', ''))}</td>"
-                f"<td>{self._escape(', '.join(decision.get('reasons', [])))}</td>"
-                "</tr>"
+                '<article class="decision-history-item">'
+                '<div class="decision-history-head">'
+                f'<div><span>Time</span><strong>{self._escape(decision.get("timestamp", ""))}</strong></div>'
+                f'<div><span>Symbol</span><strong>{self._escape(decision.get("symbol", ""))}</strong></div>'
+                f'<div><span>Action</span><strong>{self._escape(decision.get("action", ""))}</strong></div>'
+                f'<div><span>Confidence</span><strong>{self._escape(decision.get("confidence", ""))}</strong></div>'
+                f'<div><span>Risk</span><strong>{self._escape(decision.get("risk_status", ""))}</strong></div>'
+                f'<div><span>Brain</span><strong>{self._escape(decision.get("analyst_model", ""))}</strong></div>'
+                f'<div><span>Execution</span><strong>{self._escape(execution)}</strong></div>'
+                "</div>"
+                f'<div class="decision-history-reasons"><span>Reasons</span><ul>{reason_items}</ul></div>'
+                "</article>"
             )
-        return "<table><thead><tr><th>Time</th><th>Symbol</th><th>Action</th><th>Confidence</th><th>Risk</th><th>Brain</th><th>Execution</th><th>Reasons</th></tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
+        return '<div class="decision-history">' + "".join(rows) + "</div>"
 
     def _closes_table(self, closes: list[dict[str, Any]]) -> str:
         if not closes:
@@ -3719,15 +3733,7 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
       { label: "TP", value: "take_profit" },
       { label: "Opened", value: "opened_at" },
     ], operations.open_positions, "No open paper positions.");
-    table("recent-decisions-table", [
-      { label: "Time", value: "timestamp" },
-      { label: "Symbol", value: "symbol" },
-      { label: "Action", value: "action" },
-      { label: "Confidence", value: "confidence" },
-      { label: "Risk", value: "risk_status" },
-      { label: "Execution", value: "execution" },
-      { label: "Reasons", value: (row) => (row.reasons || []).join(", ") },
-    ], operations.recent_decisions, "No decisions recorded yet.");
+    decisionHistory("recent-decisions-table", operations.recent_decisions);
     table("monitor-events-table", [
       { label: "Time", value: "timestamp" },
       { label: "Iter", value: "iteration" },
@@ -3848,6 +3854,57 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
     root.append(card);
   }
 
+  function decisionHistory(id, rows) {
+    const root = $(id);
+    if (!root) return;
+    clear(root);
+    if (!rows || !rows.length) {
+      const p = document.createElement("p");
+      p.textContent = "No decisions recorded yet.";
+      root.append(p);
+      return;
+    }
+    const list = document.createElement("div");
+    list.className = "decision-history";
+    for (const row of rows) {
+      const item = document.createElement("article");
+      item.className = "decision-history-item";
+      const head = document.createElement("div");
+      head.className = "decision-history-head";
+      for (const [label, value] of [
+        ["Time", row.timestamp || ""],
+        ["Symbol", row.symbol || ""],
+        ["Action", row.action || ""],
+        ["Confidence", row.confidence || ""],
+        ["Risk", row.risk_status || ""],
+        ["Brain", row.analyst_model || ""],
+        ["Execution", row.execution || "not sent"],
+      ]) {
+        const cell = document.createElement("div");
+        const span = document.createElement("span");
+        span.textContent = label;
+        const strong = document.createElement("strong");
+        strong.textContent = value;
+        cell.append(span, strong);
+        head.append(cell);
+      }
+      const reasons = document.createElement("div");
+      reasons.className = "decision-history-reasons";
+      const label = document.createElement("span");
+      label.textContent = "Reasons";
+      const ul = document.createElement("ul");
+      for (const reason of row.reasons || ["none"]) {
+        const li = document.createElement("li");
+        li.textContent = reason;
+        ul.append(li);
+      }
+      reasons.append(label, ul);
+      item.append(head, reasons);
+      list.append(item);
+    }
+    root.append(list);
+  }
+
   function renderAgent(consoleState) {
     const monitor = consoleState.monitor || {};
     const latest = consoleState.latest_decision || {};
@@ -3864,16 +3921,7 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
       ["Risk", latest.risk_status || ""],
     ]);
     decisionCard("agent-decision-card", latest);
-    table("agent-decisions-table", [
-      { label: "Time", value: "timestamp" },
-      { label: "Symbol", value: "symbol" },
-      { label: "Action", value: "action" },
-      { label: "Confidence", value: "confidence" },
-      { label: "Risk", value: "risk_status" },
-      { label: "Brain", value: "analyst_model" },
-      { label: "Execution", value: "execution" },
-      { label: "Reasons", value: (row) => (row.reasons || []).join(", ") },
-    ], consoleState.recent_decisions, "No decisions recorded yet.");
+    decisionHistory("agent-decisions-table", consoleState.recent_decisions);
     table("agent-open-positions", [
       { label: "Symbol", value: "symbol" },
       { label: "Side", value: "side" },
@@ -4059,16 +4107,7 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
       { label: "Profit", value: "profit" },
       { label: "Opened", value: "opened_at" },
     ], agent.mt5_open_positions || [], "No open MT5 positions.");
-    table("control-history", [
-      { label: "Time", value: "timestamp" },
-      { label: "Symbol", value: "symbol" },
-      { label: "Action", value: "action" },
-      { label: "Confidence", value: "confidence" },
-      { label: "Risk", value: "risk_status" },
-      { label: "Brain", value: "analyst_model" },
-      { label: "Execution", value: "execution" },
-      { label: "Reasons", value: (row) => (row.reasons || []).join(", ") },
-    ], agent.recent_decisions || [], "No decisions recorded yet.");
+    decisionHistory("control-history", agent.recent_decisions || []);
     table("control-recent-closes", [
       { label: "Closed", value: "closed_at" },
       { label: "Symbol", value: "symbol" },
