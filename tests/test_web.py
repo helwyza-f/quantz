@@ -1,0 +1,559 @@
+import json
+import time
+
+from quantz.web import WebApp
+from quantz.models import ExecutionResult, MarketSnapshot, OrderRequest, OrderSide
+from quantz.paper import PaperPortfolio
+
+
+def test_web_index_lists_configs(tmp_path):
+    configs = tmp_path / "configs"
+    configs.mkdir()
+    (configs / "paper-demo.json").write_text(json.dumps({"symbols": ["XAUUSD"]}), encoding="utf-8")
+
+    html = WebApp(tmp_path)._index()
+
+    assert "Quantz" in html
+    assert "paper-demo.json" in html
+
+
+def test_web_config_page_shows_parsed_settings(tmp_path):
+    configs = tmp_path / "configs"
+    configs.mkdir()
+    (configs / "paper-demo.json").write_text(json.dumps({"symbols": ["XAUUSD"], "analyst": "rule"}), encoding="utf-8")
+
+    html = WebApp(tmp_path)._config_page("paper-demo.json")
+
+    assert "Valid" in html
+    assert "analyst" in html
+    assert "rule" in html
+
+
+def test_web_api_lists_experiments(tmp_path):
+    experiment = tmp_path / "data" / "experiments" / "run-001"
+    experiment.mkdir(parents=True)
+
+    payload = WebApp(tmp_path)._api("/api/experiments")
+
+    assert payload == {"experiments": ["run-001"]}
+
+
+def test_web_performance_summary_aggregates_paper_pnl(tmp_path):
+    experiment = tmp_path / "data" / "experiments" / "run-001"
+    experiment.mkdir(parents=True)
+    (experiment / "base-config.json").write_text(
+        json.dumps({"paper_start_equity": 10000, "default_risk_percent": 0.25}),
+        encoding="utf-8",
+    )
+    (experiment / "base-report.json").write_text(
+        json.dumps(
+            {
+                "total_r_multiple": 2.0,
+                "closed_position_count": 2,
+                "open_position_count": 1,
+                "win_count": 2,
+                "loss_count": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (experiment / "review.json").write_text(json.dumps({"promotion_status": "paper_only"}), encoding="utf-8")
+    (experiment / "comparison.json").write_text(json.dumps({"verdict": "continue_paper_test"}), encoding="utf-8")
+
+    summary = WebApp(tmp_path)._performance_summary()
+
+    assert summary["paper_total_r"] == 2.0
+    assert summary["estimated_pnl"] == 50.0
+    assert summary["win_rate"] == 1.0
+
+
+def test_web_index_shows_agent_performance(tmp_path):
+    configs = tmp_path / "configs"
+    configs.mkdir()
+    (configs / "paper-demo.json").write_text(json.dumps({"symbols": ["XAUUSD"]}), encoding="utf-8")
+
+    html = WebApp(tmp_path)._index()
+
+    assert "Agent Performance" in html
+    assert "Paper PnL (R)" in html
+
+
+def test_web_operations_summary_reads_paper_state_and_memory(tmp_path):
+    configs = tmp_path / "configs"
+    configs.mkdir()
+    (configs / "paper-demo.json").write_text(
+        json.dumps(
+            {
+                "symbols": ["XAUUSD"],
+                "memory_path": "data/experience.jsonl",
+                "paper_state_path": "data/paper-state.json",
+                "paper_start_equity": 10000,
+                "default_risk_percent": 0.25,
+            }
+        ),
+        encoding="utf-8",
+    )
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "paper-state.json").write_text(
+        json.dumps(
+            {
+                "open_positions": [{"symbol": "XAUUSD", "side": "buy", "entry_price": 100}],
+                "closed_positions": [{"symbol": "XAUUSD", "side": "buy", "r_multiple": 2.0}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (data / "experience.jsonl").write_text(
+        json.dumps(
+            {
+                "decision": {
+                    "timestamp": "2026-06-05T00:00:00+00:00",
+                    "symbol": "XAUUSD",
+                    "action": "open_position",
+                    "confidence": 0.8,
+                    "reason_codes": ["bullish_market_structure"],
+                },
+                "risk": {"status": "approved"},
+                "execution": {"message": "paper_order_filled"},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    summary = WebApp(tmp_path)._operations_summary()
+
+    assert summary["open_position_count"] == 1
+    assert summary["closed_position_count"] == 1
+    assert summary["experience_count"] == 1
+    assert summary["paper_total_r"] == 2.0
+    assert summary["estimated_pnl"] == 50.0
+    assert summary["recent_decisions"][0]["symbol"] == "XAUUSD"
+
+
+def test_web_operations_page_shows_agent_status(tmp_path):
+    configs = tmp_path / "configs"
+    configs.mkdir()
+    (configs / "paper-demo.json").write_text(json.dumps({"symbols": ["XAUUSD"]}), encoding="utf-8")
+
+    html = WebApp(tmp_path)._operations_page()
+
+    assert "Agent Status" in html
+    assert "Open Positions" in html
+    assert "Recent Decisions" in html
+    assert "/api/monitor" in html
+    assert "/api/operations" in html
+    assert "setInterval(refreshLivePanels" in html
+
+
+def test_web_pnl_summary_groups_symbol_performance_and_reasons(tmp_path):
+    configs = tmp_path / "configs"
+    configs.mkdir()
+    (configs / "paper-demo.json").write_text(
+        json.dumps(
+            {
+                "symbols": ["XAUUSD", "EURUSD"],
+                "memory_path": "data/experience.jsonl",
+                "paper_state_path": "data/paper-state.json",
+                "paper_start_equity": 10000,
+                "default_risk_percent": 0.25,
+            }
+        ),
+        encoding="utf-8",
+    )
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "paper-state.json").write_text(
+        json.dumps(
+            {
+                "open_positions": [],
+                "closed_positions": [
+                    {
+                        "symbol": "XAUUSD",
+                        "closed_at": "2026-06-05T00:00:00+00:00",
+                        "r_multiple": 1.7,
+                        "reason_codes": ["spread_acceptable"],
+                    },
+                    {
+                        "symbol": "EURUSD",
+                        "closed_at": "2026-06-05T01:00:00+00:00",
+                        "r_multiple": -1.0,
+                        "reason_codes": ["spread_too_wide"],
+                    },
+                    {
+                        "symbol": "XAUUSD",
+                        "closed_at": "2026-06-05T02:00:00+00:00",
+                        "r_multiple": 1.7,
+                        "reason_codes": ["spread_acceptable"],
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    rows = [
+        {
+            "decision": {"symbol": "XAUUSD", "reason_codes": ["spread_acceptable"]},
+            "risk": {"status": "approved", "reasons": ["risk_checks_passed"]},
+        },
+        {
+            "decision": {"symbol": "EURUSD", "reason_codes": ["spread_too_wide"]},
+            "risk": {"status": "rejected", "reasons": ["spread_above_limit"]},
+        },
+    ]
+    (data / "experience.jsonl").write_text(
+        "\n".join(json.dumps(row) for row in rows) + "\n",
+        encoding="utf-8",
+    )
+
+    summary = WebApp(tmp_path)._pnl_summary()
+
+    assert summary["closed_position_count"] == 3
+    assert summary["paper_total_r"] == 2.4
+    assert summary["estimated_pnl"] == 60.0
+    assert summary["max_drawdown_r"] == -1.0
+    assert summary["by_symbol"][0]["symbol"] == "XAUUSD"
+    assert summary["by_symbol"][0]["total_r"] == 3.4
+    assert summary["decision_reasons"]["spread_acceptable"] == 1
+    assert summary["rejection_reasons"]["spread_above_limit"] == 1
+    assert summary["reason_profit"]["spread_acceptable"]["total_r"] == 3.4
+    assert summary["reason_quality"][0]["reason"] in {"spread_acceptable", "spread_too_wide"}
+
+
+def test_web_pnl_page_shows_dashboard_sections(tmp_path):
+    configs = tmp_path / "configs"
+    configs.mkdir()
+    (configs / "paper-demo.json").write_text(
+        json.dumps({"symbols": ["XAUUSD"], "paper_state_path": "data/paper-state.json"}),
+        encoding="utf-8",
+    )
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "paper-state.json").write_text(
+        json.dumps({"open_positions": [], "closed_positions": [{"symbol": "XAUUSD", "closed_at": "t", "r_multiple": 1.7}]}),
+        encoding="utf-8",
+    )
+
+    html = WebApp(tmp_path)._pnl_page()
+
+    assert "PnL Summary" in html
+    assert "Equity Curve" in html
+    assert "Visual Charts" in html
+    assert "Reason Quality" in html
+    assert "Symbol Performance" in html
+    assert "symbol-r-chart" in html
+    assert "<svg" in html
+    assert "/api/pnl" in html
+    assert "setInterval(refreshLivePanels" in html
+
+
+def test_web_visual_digest_exposes_agent_readable_chart_data(tmp_path):
+    configs = tmp_path / "configs"
+    configs.mkdir()
+    (configs / "paper-demo.json").write_text(
+        json.dumps(
+            {
+                "symbols": ["XAUUSD"],
+                "memory_path": "data/experience.jsonl",
+                "paper_state_path": "data/paper-state.json",
+                "paper_start_equity": 10000,
+                "default_risk_percent": 0.25,
+            }
+        ),
+        encoding="utf-8",
+    )
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "paper-state.json").write_text(
+        json.dumps(
+            {
+                "open_positions": [],
+                "closed_positions": [
+                    {"symbol": "XAUUSD", "closed_at": "t", "r_multiple": 1.7, "reason_codes": ["spread_acceptable"]}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (data / "experience.jsonl").write_text(
+        json.dumps(
+            {
+                "decision": {"symbol": "XAUUSD", "confidence": 0.8, "reason_codes": ["spread_acceptable"]},
+                "risk": {"status": "approved"},
+                "execution": {"accepted": True},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    digest = WebApp(tmp_path)._api("/api/visual-digest")
+
+    assert digest["purpose"] == "structured_visual_digest_for_agent_review"
+    assert digest["summary"]["paper_total_r"] == 1.7
+    assert digest["charts"]["reason_quality"][0]["reason"] == "spread_acceptable"
+    assert digest["charts"]["reason_profit"]["spread_acceptable"]["total_r"] == 1.7
+    assert digest["agent_read"]["best_symbols"][0]["symbol"] == "XAUUSD"
+
+
+def test_web_market_chart_reads_simulated_candles(tmp_path):
+    configs = tmp_path / "configs"
+    configs.mkdir()
+    (configs / "paper-demo.json").write_text(
+        json.dumps({"symbols": ["XAUUSD"], "sim_state_path": "data/sim-market-state.json"}),
+        encoding="utf-8",
+    )
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "sim-market-state.json").write_text(
+        json.dumps(
+            {
+                "XAUUSD": {
+                    "step": 2,
+                    "mid": 101,
+                    "history": [
+                        {"step": 1, "open": 100, "high": 102, "low": 99, "close": 101},
+                        {"step": 2, "open": 101, "high": 103, "low": 100, "close": 102},
+                    ],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (data / "paper-state.json").write_text(
+        json.dumps(
+            {
+                "open_positions": [
+                    {
+                        "symbol": "XAUUSD",
+                        "side": "buy",
+                        "entry_price": 101,
+                        "stop_loss": 99,
+                        "take_profit": 103,
+                    }
+                ],
+                "closed_positions": [
+                    {
+                        "symbol": "XAUUSD",
+                        "exit_reason": "take_profit",
+                        "exit_price": 102,
+                        "r_multiple": 1.7,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (data / "experience.jsonl").write_text(
+        json.dumps(
+            {
+                "decision": {
+                    "symbol": "XAUUSD",
+                    "action": "open_position",
+                    "side": "buy",
+                    "confidence": 0.8,
+                    "reason_codes": ["spread_acceptable"],
+                },
+                "risk": {"status": "approved"},
+                "execution": {"accepted": True},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    app = WebApp(tmp_path)
+    payload = app._api("/api/market-chart")
+    html = app._market_page()
+
+    assert payload["series"]["XAUUSD"][0]["open"] == 100
+    assert payload["overlays"]["XAUUSD"]["indicators"][0]["ma_fast"] == 101
+    assert payload["overlays"]["XAUUSD"]["signals"][0]["side"] == "buy"
+    assert payload["overlays"]["XAUUSD"]["open_positions"][0]["entry_price"] == 101
+    assert "Candlestick" in html
+    assert "market-symbol-select" in html
+    assert "entry" in html
+    assert "TP" in html
+    assert "market-ma-fast" in html
+    assert "market-atr" in html
+    assert "<svg" in html
+
+
+def monitor_with_events(settings, iterations, quiet=False, stop_event=None, event_sink=None):
+    for iteration in range(1, iterations + 1):
+        if stop_event is not None and stop_event.is_set():
+            break
+        if event_sink is not None:
+            event_sink(
+                {
+                    "timestamp": f"t-{iteration}",
+                    "iteration": iteration,
+                    "symbol": settings.symbols[0],
+                    "action": "open_position",
+                    "risk_status": "approved",
+                    "execution": "paper_order_filled",
+                    "closed_positions": 0,
+                }
+            )
+
+
+def slow_monitor(settings, iterations, quiet=False, stop_event=None, event_sink=None):
+    for iteration in range(1, iterations + 1):
+        if stop_event is not None and stop_event.is_set():
+            break
+        if event_sink is not None:
+            event_sink({"timestamp": f"t-{iteration}", "iteration": iteration, "symbol": settings.symbols[0]})
+        time.sleep(0.01)
+
+
+def test_web_monitor_start_records_events_and_completes(tmp_path):
+    configs = tmp_path / "configs"
+    configs.mkdir()
+    (configs / "paper-demo.json").write_text(
+        json.dumps({"symbols": ["XAUUSD"], "market_source": "sim", "mode": "paper"}),
+        encoding="utf-8",
+    )
+    app = WebApp(tmp_path, monitor_fn=monitor_with_events)
+
+    result = app._start_monitor_from_form(
+        {"config": ["paper-demo.json"], "max_iterations": ["2"], "interval_seconds": ["0.1"]}
+    )
+    app.monitor_thread.join(timeout=1)
+    summary = app._monitor_summary()
+
+    assert result == {"status": "started"}
+    assert summary["running"] is False
+    assert summary["status"] == "completed"
+    assert summary["event_count"] == 2
+    assert summary["recent_events"][0]["iteration"] == 2
+    assert (tmp_path / "data" / "monitor-session.json").exists()
+
+
+def test_web_monitor_session_persists_after_restart(tmp_path):
+    configs = tmp_path / "configs"
+    configs.mkdir()
+    (configs / "paper-demo.json").write_text(
+        json.dumps({"symbols": ["XAUUSD"], "market_source": "sim", "mode": "paper"}),
+        encoding="utf-8",
+    )
+    app = WebApp(tmp_path, monitor_fn=monitor_with_events)
+
+    app._start_monitor_from_form({"config": ["paper-demo.json"], "max_iterations": ["2"], "interval_seconds": ["0.1"]})
+    app.monitor_thread.join(timeout=1)
+    restored = WebApp(tmp_path, monitor_fn=monitor_with_events)._monitor_summary()
+
+    assert restored["status"] == "completed"
+    assert restored["event_count"] == 2
+    assert restored["recent_events"][0]["iteration"] == 2
+
+
+def test_web_monitor_running_snapshot_restores_as_interrupted(tmp_path):
+    state_path = tmp_path / "data" / "monitor-session.json"
+    state_path.parent.mkdir()
+    state_path.write_text(
+        json.dumps(
+            {
+                "state": {
+                    "running": True,
+                    "status": "running",
+                    "config": "paper-demo.json",
+                    "max_iterations": 100,
+                    "started_at": "2026-06-05T00:00:00+00:00",
+                    "stopped_at": None,
+                    "error": None,
+                },
+                "events": [{"iteration": 1, "symbol": "XAUUSD"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    summary = WebApp(tmp_path, monitor_fn=monitor_with_events)._monitor_summary()
+
+    assert summary["running"] is False
+    assert summary["status"] == "interrupted"
+    assert summary["event_count"] == 1
+
+
+def test_web_monitor_stop_marks_stopping(tmp_path):
+    configs = tmp_path / "configs"
+    configs.mkdir()
+    (configs / "paper-demo.json").write_text(
+        json.dumps({"symbols": ["XAUUSD"], "market_source": "sim", "mode": "paper"}),
+        encoding="utf-8",
+    )
+    app = WebApp(tmp_path, monitor_fn=slow_monitor)
+
+    app._start_monitor_from_form({"config": ["paper-demo.json"], "max_iterations": ["100"], "interval_seconds": ["0.1"]})
+    stop_result = app._stop_monitor()
+    app.monitor_thread.join(timeout=1)
+    summary = app._monitor_summary()
+
+    assert stop_result == {"status": "stopping"}
+    assert summary["running"] is False
+    assert summary["status"] == "stopped"
+
+
+def fake_monitor(settings, iterations, quiet=False):
+    portfolio = PaperPortfolio(settings.paper_state_path)
+    portfolio.open_position(
+        OrderRequest(
+            symbol="XAUUSD",
+            side=OrderSide.BUY,
+            volume=0.01,
+            entry_price=100,
+            stop_loss=99,
+            take_profit=101,
+            comment="test",
+        ),
+        ExecutionResult(True, "paper-1", "filled", filled_price=100),
+    )
+    portfolio.reconcile(
+        MarketSnapshot(
+            symbol="XAUUSD",
+            bid=101.1,
+            ask=101.2,
+            spread_points=10,
+            atr_points=100,
+            trend_score=0.5,
+            volatility_score=0.5,
+            session="test",
+        )
+    )
+    with open(settings.memory_path, "a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "decision": {"symbol": "XAUUSD", "confidence": 0.8},
+                    "risk": {"status": "approved", "reasons": ["risk_checks_passed"]},
+                    "execution": {"accepted": True},
+                }
+            )
+            + "\n"
+        )
+
+
+def test_web_index_includes_run_experiment_form(tmp_path):
+    configs = tmp_path / "configs"
+    configs.mkdir()
+    (configs / "paper-demo.json").write_text(json.dumps({"symbols": ["XAUUSD"]}), encoding="utf-8")
+
+    html = WebApp(tmp_path, monitor_fn=fake_monitor)._index()
+
+    assert "Run Experiment" in html
+    assert "/experiments/run" in html
+
+
+def test_web_run_experiment_creates_dashboard(tmp_path):
+    configs = tmp_path / "configs"
+    configs.mkdir()
+    (configs / "paper-demo.json").write_text(json.dumps({"symbols": ["XAUUSD"], "market_source": "sim"}), encoding="utf-8")
+
+    result = WebApp(tmp_path, monitor_fn=fake_monitor)._run_experiment_from_form(
+        {"config": ["paper-demo.json"], "run_name": ["run-001"], "iterations": ["1"]}
+    )
+
+    assert "error" not in result
+    assert (tmp_path / "data" / "experiments" / "run-001" / "dashboard.html").exists()
+    assert (tmp_path / "data" / "experiments" / "run-001" / "comparison.json").exists()

@@ -1,0 +1,19 @@
+{
+  "symbols": ["XAUUSD", "EURUSD", "GBPUSD", "USDJPY", "BTCUSD"],
+  "memory_path": "data/experience.jsonl",
+  "paper_state_path": "data/paper-state.json",
+  "sim_state_path": "data/sim-market-state.json",
+  "mode": "paper",
+  "market_source": "sim",
+  "execution_source": "mt5",
+  "bridge_url": "http://127.0.0.1:8765",
+  "interval_seconds": 60,
+  "default_risk_percent": 0.25,
+  "paper_start_equity": 10000,
+  "min_confidence": 0.65,
+  "reward_risk_ratio": 1.7,
+  "position_cooldown": "none",
+  "disabled_symbols": [],
+  "min_closed_trades_before_demo": 20,
+  "analyst": "rule"
+}
