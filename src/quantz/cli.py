@@ -269,11 +269,28 @@ def _monitor(
 def _agent(settings: AgentSettings, bridge_client: BridgeClient) -> TradingAgent:
     return TradingAgent(
         planner=VariableDrivenPlanner(),
-        risk_governor=RiskGovernor(RiskConfig()),
+        risk_governor=RiskGovernor(_risk_config(settings)),
         broker=_broker(settings.mode, settings.execution_source, bridge_client),
         memory=JsonlExperienceStore(settings.memory_path),
         paper_portfolio=PaperPortfolio(settings.paper_state_path) if settings.mode == "paper" else None,
         analyst=_analyst(settings),
+    )
+
+
+def _risk_config(settings: AgentSettings) -> RiskConfig:
+    return RiskConfig(
+        max_risk_per_trade_percent=settings.risk_max_risk_per_trade_percent,
+        max_daily_loss_percent=settings.risk_max_daily_loss_percent,
+        max_open_positions=settings.risk_max_open_positions,
+        max_open_risk_percent=settings.risk_max_open_risk_percent,
+        max_spread_points=settings.risk_max_spread_points,
+        min_confidence=settings.min_confidence,
+        min_free_margin_percent=settings.risk_min_free_margin_percent,
+        lot_step=settings.risk_lot_step,
+        min_lot=settings.risk_min_lot,
+        max_lot=settings.risk_max_lot,
+        contract_size=settings.risk_contract_size,
+        allow_min_lot_when_below_minimum=settings.allow_min_lot_when_below_minimum,
     )
 
 

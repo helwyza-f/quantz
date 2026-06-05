@@ -28,10 +28,11 @@ class VariableDrivenPlanner(AgentPlanner):
         direction: OrderSide | None = None
         reason_codes: list[str] = []
 
-        if market.trend_score >= 0.45:
+        min_trend_score = float(constraints.get("planner_min_trend_score", 0.45))
+        if market.trend_score >= min_trend_score:
             direction = OrderSide.BUY
             reason_codes.append("bullish_market_structure")
-        elif market.trend_score <= -0.45:
+        elif market.trend_score <= -min_trend_score:
             direction = OrderSide.SELL
             reason_codes.append("bearish_market_structure")
 
@@ -54,8 +55,15 @@ class VariableDrivenPlanner(AgentPlanner):
         confidence = self._confidence(market.trend_score, market.volatility_score, market.spread_points)
         if analyst:
             confidence = round(max(0.0, min(1.0, confidence + analyst.confidence_adjustment)), 4)
-        analyst_blocked = bool(analyst and analyst.avoid_trade)
-        if analyst_blocked:
+        analyst_blocked = bool(
+            analyst
+            and analyst.avoid_trade
+            and bool(constraints.get("analyst_can_veto", True))
+        )
+        if analyst and analyst.avoid_trade and not analyst_blocked:
+            reason_codes.append("analyst_avoid_recorded_without_veto")
+            reason_codes.extend(analyst.risk_notes)
+        elif analyst_blocked:
             reason_codes.extend(analyst.risk_notes)
 
         if direction is None or confidence < min_confidence or not volatility_ok or news_blocked or analyst_blocked:

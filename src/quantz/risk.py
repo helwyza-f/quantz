@@ -17,7 +17,8 @@ class RiskConfig:
     lot_step: float = 0.01
     min_lot: float = 0.01
     max_lot: float = 1.0
-    contract_size: float = 100_000
+    contract_size: float = 1_000
+    allow_min_lot_when_below_minimum: bool = False
 
 
 class RiskGovernor:
@@ -64,7 +65,10 @@ class RiskGovernor:
 
         lot = self._position_size(context, decision)
         if lot < self.config.min_lot:
-            return RiskDecision(DecisionStatus.REJECTED, 0.0, ["computed_lot_below_minimum"])
+            if not self.config.allow_min_lot_when_below_minimum:
+                return RiskDecision(DecisionStatus.REJECTED, 0.0, ["computed_lot_below_minimum"])
+            lot = min(self.config.min_lot, self.config.max_lot)
+            return RiskDecision(DecisionStatus.APPROVED, lot, ["risk_checks_passed", "min_lot_demo_override"])
 
         return RiskDecision(DecisionStatus.APPROVED, lot, ["risk_checks_passed"])
 
@@ -79,4 +83,4 @@ class RiskGovernor:
 
         raw_lot = risk_amount / (stop_distance * self.config.contract_size)
         stepped = int(raw_lot / self.config.lot_step) * self.config.lot_step
-        return round(max(self.config.min_lot, min(stepped, self.config.max_lot)), 2)
+        return round(min(stepped, self.config.max_lot), 2)

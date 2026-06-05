@@ -2876,7 +2876,7 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
         )
         agent = TradingAgent(
             planner=VariableDrivenPlanner(),
-            risk_governor=RiskGovernor(RiskConfig()),
+            risk_governor=RiskGovernor(self._risk_config_from_settings(settings)),
             broker=self._stream_broker(settings),
             memory=JsonlExperienceStore(settings.memory_path),
             paper_portfolio=PaperPortfolio(settings.paper_state_path) if settings.mode == "paper" else None,
@@ -2896,6 +2896,22 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
                     "open_symbol_positions": external_open_symbol_positions,
                 },
             )
+        )
+
+    def _risk_config_from_settings(self, settings: Any) -> RiskConfig:
+        return RiskConfig(
+            max_risk_per_trade_percent=float(getattr(settings, "risk_max_risk_per_trade_percent", 0.5) or 0.5),
+            max_daily_loss_percent=float(getattr(settings, "risk_max_daily_loss_percent", 2.0) or 2.0),
+            max_open_positions=int(getattr(settings, "risk_max_open_positions", 3) or 3),
+            max_open_risk_percent=float(getattr(settings, "risk_max_open_risk_percent", 1.5) or 1.5),
+            max_spread_points=float(getattr(settings, "risk_max_spread_points", 50) or 50),
+            min_confidence=float(getattr(settings, "min_confidence", 0.65) or 0.65),
+            min_free_margin_percent=float(getattr(settings, "risk_min_free_margin_percent", 30) or 30),
+            lot_step=float(getattr(settings, "risk_lot_step", 0.01) or 0.01),
+            min_lot=float(getattr(settings, "risk_min_lot", 0.01) or 0.01),
+            max_lot=float(getattr(settings, "risk_max_lot", 1.0) or 1.0),
+            contract_size=float(getattr(settings, "risk_contract_size", 1_000) or 1_000),
+            allow_min_lot_when_below_minimum=bool(getattr(settings, "allow_min_lot_when_below_minimum", False)),
         )
 
     def _stream_broker(self, settings: Any) -> Any:

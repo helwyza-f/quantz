@@ -20,6 +20,22 @@ class AgentSettings:
     default_risk_percent: float = 0.25
     paper_start_equity: float = 10_000
     min_confidence: float = 0.65
+    planner_min_trend_score: float = 0.45
+    planner_max_spread_points: float = 40
+    analyst_max_spread_points: float = 60
+    analyst_can_veto: bool = True
+    risk_max_spread_points: float = 50
+    risk_max_risk_per_trade_percent: float = 0.5
+    risk_max_daily_loss_percent: float = 2.0
+    risk_max_open_positions: int = 3
+    risk_max_open_risk_percent: float = 1.5
+    risk_min_free_margin_percent: float = 30
+    risk_lot_step: float = 0.01
+    risk_min_lot: float = 0.01
+    risk_max_lot: float = 1.0
+    risk_contract_size: float = 1_000
+    allow_min_lot_when_below_minimum: bool = False
+    min_sl_points: float = 120
     reward_risk_ratio: float = 1.7
     position_cooldown: str = "none"
     disabled_symbols: list[str] = field(default_factory=list)
@@ -35,6 +51,11 @@ class AgentSettings:
         return {
             "default_risk_percent": self.default_risk_percent,
             "min_confidence": self.min_confidence,
+            "planner_min_trend_score": self.planner_min_trend_score,
+            "planner_max_spread_points": self.planner_max_spread_points,
+            "analyst_max_spread_points": self.analyst_max_spread_points,
+            "analyst_can_veto": self.analyst_can_veto,
+            "min_sl_points": self.min_sl_points,
             "reward_risk_ratio": self.reward_risk_ratio,
         }
 

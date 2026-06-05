@@ -6,7 +6,7 @@ from quantz.memory import JsonlExperienceStore
 from quantz.models import AgentContext, DecisionStatus, TradeAction
 from quantz.paper import PaperPortfolio
 from quantz.planner import VariableDrivenPlanner
-from quantz.risk import RiskGovernor
+from quantz.risk import RiskConfig, RiskGovernor
 
 
 def test_agent_can_place_paper_trade(tmp_path):
@@ -93,6 +93,49 @@ def test_paper_agent_counts_external_symbol_position(tmp_path):
     assert record.execution is None
     assert record.risk.status == DecisionStatus.REJECTED
     assert "symbol_already_has_open_paper_position" in record.risk.reasons
+
+
+def test_risk_governor_rejects_position_size_below_min_lot(tmp_path):
+    market = DemoMarketFeed().snapshot("XAUUSD")
+    context = AgentContext(
+        market=market,
+        account=DemoAccountFeed().state(),
+        constraints={"default_risk_percent": 0.01, "min_confidence": 0.65},
+    )
+    agent = TradingAgent(
+        planner=VariableDrivenPlanner(),
+        risk_governor=RiskGovernor(RiskConfig(contract_size=1_000_000)),
+        broker=PaperBrokerAdapter(),
+        memory=JsonlExperienceStore(tmp_path / "experience.jsonl"),
+    )
+
+    record = agent.run_once(context)
+
+    assert record.execution is None
+    assert record.risk.status == DecisionStatus.REJECTED
+    assert "computed_lot_below_minimum" in record.risk.reasons
+
+
+def test_risk_governor_can_explicitly_allow_demo_min_lot_override(tmp_path):
+    market = DemoMarketFeed().snapshot("XAUUSD")
+    context = AgentContext(
+        market=market,
+        account=DemoAccountFeed().state(),
+        constraints={"default_risk_percent": 0.01, "min_confidence": 0.65},
+    )
+    agent = TradingAgent(
+        planner=VariableDrivenPlanner(),
+        risk_governor=RiskGovernor(RiskConfig(contract_size=1_000_000, max_lot=0.01, allow_min_lot_when_below_minimum=True)),
+        broker=PaperBrokerAdapter(),
+        memory=JsonlExperienceStore(tmp_path / "experience.jsonl"),
+    )
+
+    record = agent.run_once(context)
+
+    assert record.execution is not None
+    assert record.risk.status == DecisionStatus.APPROVED
+    assert record.risk.approved_lot == 0.01
+    assert "min_lot_demo_override" in record.risk.reasons
 
 
 def test_agent_records_analyst_metadata(tmp_path):
