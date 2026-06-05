@@ -25,6 +25,10 @@ class AgentSettings:
     disabled_symbols: list[str] = field(default_factory=list)
     min_closed_trades_before_demo: int = 20
     analyst: str = "none"
+    llm_model: str = "gpt-5.1-mini"
+    llm_api_key_env: str = "OPENAI_API_KEY"
+    llm_timeout_seconds: float = 12.0
+    allow_live_execution: bool = False
 
     @property
     def constraints(self) -> dict[str, Any]:

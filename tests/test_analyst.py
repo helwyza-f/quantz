@@ -1,4 +1,4 @@
-from quantz.analyst import RuleBasedAnalyst
+from quantz.analyst import LLMAnalyst, RuleBasedAnalyst
 from quantz.models import AccountState, AgentContext, MarketSnapshot, TradeAction
 from quantz.planner import VariableDrivenPlanner
 
@@ -44,3 +44,31 @@ def test_rule_analyst_adjusts_confidence_for_strong_trend():
     assert analysis.confidence_adjustment > 0
     assert adjusted.confidence > plain.confidence
     assert "strong_trend" in adjusted.reason_codes
+
+
+def test_llm_analyst_fails_closed_without_api_key(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    analysis = LLMAnalyst().analyze(context())
+
+    assert analysis.avoid_trade is True
+    assert "llm_analyst_unavailable" in analysis.reason_codes
+    assert "llm_api_key_missing" in analysis.risk_notes
+
+
+def test_llm_analyst_reads_structured_response():
+    analyst = LLMAnalyst(
+        request_fn=lambda _payload: {
+            "output_text": (
+                '{"market_regime":"trend","bias":"buy","confidence_adjustment":0.05,'
+                '"avoid_trade":false,"reason_codes":["llm_trend_confirmed"],"risk_notes":[]}'
+            )
+        }
+    )
+
+    analysis = analyst.analyze(context())
+
+    assert analysis.avoid_trade is False
+    assert analysis.bias == "buy"
+    assert analysis.confidence_adjustment == 0.05
+    assert analysis.reason_codes == ["llm_trend_confirmed"]

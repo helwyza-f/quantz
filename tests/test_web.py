@@ -2,7 +2,7 @@ import json
 import time
 
 from quantz.web import WebApp
-from quantz.models import AccountState, ExecutionResult, MarketSnapshot, OrderRequest, OrderSide
+from quantz.models import AccountState, AnalystOutput, ExecutionResult, MarketSnapshot, OrderRequest, OrderSide
 from quantz.paper import PaperPortfolio
 
 
@@ -936,6 +936,125 @@ def test_web_stream_agent_runs_from_new_ea_socket_tick(tmp_path, monkeypatch):
     assert console["latest_decision"]["action"] == "open_position"
     assert console["latest_decision"]["risk_status"] == "approved"
     assert console["open_position_count"] == 1
+
+
+def test_web_stream_agent_can_use_explicit_live_mt5_config(tmp_path, monkeypatch):
+    configs = tmp_path / "configs"
+    configs.mkdir()
+    (configs / "mt5-demo-live.json").write_text(
+        json.dumps(
+            {
+                "symbols": ["XAUUSD"],
+                "market_source": "mt5",
+                "mode": "live",
+                "execution_source": "mt5",
+                "allow_live_execution": True,
+                "analyst": "llm",
+                "memory_path": "data/live-experience.jsonl",
+                "paper_state_path": "data/live-paper-state.json",
+                "paper_start_equity": 10000,
+                "min_confidence": 0.65,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class FakeConnection:
+        pass
+
+    class FakeMarketFeed:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def snapshot(self, symbol):
+            return MarketSnapshot(
+                symbol=symbol,
+                bid=100.0,
+                ask=100.1,
+                spread_points=10,
+                atr_points=120,
+                trend_score=0.8,
+                volatility_score=0.5,
+                session="test",
+                news_risk="low",
+                features={"source": "mt5", "rates_loaded": 64},
+            )
+
+    class FakeAccountFeed:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def state(self):
+            return AccountState(equity=10000, balance=10000, free_margin=10000, open_positions=0)
+
+    class FakeLLMAnalyst:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def analyze(self, context):
+            return AnalystOutput(
+                market_regime="trend",
+                bias="buy",
+                confidence_adjustment=0.05,
+                avoid_trade=False,
+                reason_codes=["llm_trend_confirmed"],
+                model_version="fake_llm",
+            )
+
+    class FakeMt5Broker:
+        placed = []
+
+        def place_order(self, order):
+            self.placed.append(order)
+            return ExecutionResult(True, "mt5-1", "mt5_retcode:10009", filled_price=order.entry_price)
+
+    monkeypatch.setattr("quantz.web.Mt5Connection", FakeConnection)
+    monkeypatch.setattr("quantz.web.Mt5MarketFeed", FakeMarketFeed)
+    monkeypatch.setattr("quantz.web.Mt5AccountFeed", FakeAccountFeed)
+    monkeypatch.setattr("quantz.web.LLMAnalyst", FakeLLMAnalyst)
+    monkeypatch.setattr("quantz.web.Mt5BrokerAdapter", FakeMt5Broker)
+
+    app = WebApp(tmp_path)
+    app._mt5_open_positions = lambda _symbols: []
+    result = app._start_monitor_from_form(
+        {
+            "config": ["mt5-demo-live.json"],
+            "max_iterations": ["1"],
+            "interval_seconds": ["0.1"],
+            "trigger_mode": ["stream"],
+        }
+    )
+    app._ingest_bridge_tick(
+        json.dumps({"symbol": "XAUUSD", "bid": 100.1, "ask": 100.2, "point": 0.01, "digits": 2, "tick_time": 1780650000})
+    )
+    app.monitor_thread.join(timeout=2)
+    console = app._api("/api/agent-console")
+
+    assert result == {"status": "started"}
+    assert FakeMt5Broker.placed
+    assert console["mode"] == "live"
+    assert console["brain"] == "llm:gpt-5.1-mini"
+    assert console["latest_decision"]["risk_status"] == "approved"
+
+
+def test_web_stream_agent_rejects_live_config_without_explicit_opt_in(tmp_path):
+    configs = tmp_path / "configs"
+    configs.mkdir()
+    (configs / "mt5-live.json").write_text(
+        json.dumps({"symbols": ["XAUUSD"], "market_source": "mt5", "mode": "live", "execution_source": "mt5"}),
+        encoding="utf-8",
+    )
+
+    result = WebApp(tmp_path)._start_monitor_from_form(
+        {
+            "config": ["mt5-live.json"],
+            "max_iterations": ["1"],
+            "interval_seconds": ["0.1"],
+            "trigger_mode": ["stream"],
+        }
+    )
+
+    assert result["error"] == "live mode requires allow_live_execution=true in the selected config"
 
 
 def monitor_with_events(settings, iterations, quiet=False, stop_event=None, event_sink=None):

@@ -12,8 +12,8 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from quantz.agent import TradingAgent
-from quantz.analyst import RuleBasedAnalyst
-from quantz.broker import PaperBrokerAdapter
+from quantz.analyst import LLMAnalyst, RuleBasedAnalyst
+from quantz.broker import Mt5BrokerAdapter, PaperBrokerAdapter
 from quantz.config import load_settings, merge_settings, settings_to_dict
 from quantz.dashboard import DashboardRenderer
 from quantz.experiment import ExperimentRunner
@@ -668,7 +668,20 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
 </html>"""
 
     def _settings_metrics(self, settings: dict[str, Any]) -> str:
-        keys = ["mode", "market_source", "analyst", "symbols", "position_cooldown", "paper_start_equity", "min_confidence", "reward_risk_ratio", "interval_seconds"]
+        keys = [
+            "mode",
+            "market_source",
+            "execution_source",
+            "analyst",
+            "llm_model",
+            "allow_live_execution",
+            "symbols",
+            "position_cooldown",
+            "paper_start_equity",
+            "min_confidence",
+            "reward_risk_ratio",
+            "interval_seconds",
+        ]
         return "".join(
             f'<div class="metric"><span>{self._escape(key)}</span><strong>{self._escape(settings.get(key, ""))}</strong></div>'
             for key in keys
@@ -2570,7 +2583,9 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
                 settings = load_settings(str(self._safe_config_path(name)))
             except Exception:
                 continue
-            if getattr(settings, "mode", "paper") == "paper":
+            if getattr(settings, "mode", "paper") == "paper" or (
+                getattr(settings, "mode", "paper") == "live" and bool(getattr(settings, "allow_live_execution", False))
+            ):
                 names.append(name)
         return names
 
@@ -2578,6 +2593,8 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
         analyst = getattr(settings, "analyst", "none")
         if analyst == "rule":
             return "rule-based"
+        if analyst == "llm":
+            return f"llm:{getattr(settings, 'llm_model', '')}"
         if analyst == "none":
             return "planner-only"
         return str(analyst)
@@ -2630,8 +2647,8 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
             if trigger_mode not in {"interval", "stream"}:
                 raise ValueError("trigger_mode must be interval or stream")
             settings = load_settings(str(self._safe_config_path(config_name)))
-            if settings.mode == "live":
-                raise ValueError("web monitor start refuses live mode; use paper mode until live safeguards are explicit")
+            if settings.mode == "live" and not bool(getattr(settings, "allow_live_execution", False)):
+                raise ValueError("live mode requires allow_live_execution=true in the selected config")
             if trigger_mode == "stream" and settings.market_source != "mt5":
                 raise ValueError("stream agent requires market_source: mt5 and EA socket ticks")
             settings = merge_settings(
@@ -2800,10 +2817,10 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
         agent = TradingAgent(
             planner=VariableDrivenPlanner(),
             risk_governor=RiskGovernor(RiskConfig()),
-            broker=PaperBrokerAdapter(),
+            broker=self._stream_broker(settings),
             memory=JsonlExperienceStore(settings.memory_path),
-            paper_portfolio=PaperPortfolio(settings.paper_state_path),
-            analyst=RuleBasedAnalyst() if settings.analyst == "rule" else None,
+            paper_portfolio=PaperPortfolio(settings.paper_state_path) if settings.mode == "paper" else None,
+            analyst=self._stream_analyst(settings),
         )
         return agent.run_once(
             AgentContext(
@@ -2815,9 +2832,31 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
                     "stream_symbol": symbol,
                     "external_open_symbol_positions": external_open_symbol_positions,
                     "external_open_positions_source": "mt5",
+                    "block_when_symbol_open": True,
+                    "open_symbol_positions": external_open_symbol_positions,
                 },
             )
         )
+
+    def _stream_broker(self, settings: Any) -> Any:
+        if settings.mode == "paper":
+            return PaperBrokerAdapter()
+        if settings.mode == "live" and getattr(settings, "execution_source", "mt5") == "mt5":
+            if not bool(getattr(settings, "allow_live_execution", False)):
+                raise RuntimeError("live_execution_not_allowed")
+            return Mt5BrokerAdapter()
+        raise RuntimeError(f"unsupported_stream_execution:{settings.mode}:{getattr(settings, 'execution_source', '')}")
+
+    def _stream_analyst(self, settings: Any) -> Any:
+        if settings.analyst == "rule":
+            return RuleBasedAnalyst()
+        if settings.analyst == "llm":
+            return LLMAnalyst(
+                model=getattr(settings, "llm_model", "gpt-5.1-mini"),
+                api_key_env=getattr(settings, "llm_api_key_env", "OPENAI_API_KEY"),
+                timeout_seconds=float(getattr(settings, "llm_timeout_seconds", 12.0) or 12.0),
+            )
+        return None
 
     def _market_snapshot_from_stream_tick(self, settings: Any, tick: dict[str, Any]) -> MarketSnapshot:
         symbol = str(tick.get("symbol", settings.symbols[0])).upper()

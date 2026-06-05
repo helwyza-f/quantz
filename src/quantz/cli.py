@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Any
 
 from quantz.agent import TradingAgent
-from quantz.analyst import NoOpAnalyst, RuleBasedAnalyst
+from quantz.analyst import LLMAnalyst, NoOpAnalyst, RuleBasedAnalyst
 from quantz.bridge import BridgeAccountFeed, BridgeBrokerAdapter, BridgeClient, BridgeMarketFeed
 from quantz.broker import Mt5BrokerAdapter, PaperBrokerAdapter
 from quantz.candidate import CandidateConfigBuilder
@@ -47,7 +47,7 @@ def main() -> None:
     run_once.add_argument("--paper-state-path")
     run_once.add_argument("--sim-state-path")
     run_once.add_argument("--mode", choices=["paper", "live"])
-    run_once.add_argument("--analyst", choices=["none", "rule"])
+    run_once.add_argument("--analyst", choices=["none", "rule", "llm"])
     run_once.add_argument("--market-source", choices=["demo", "sim", "mt5", "bridge"])
     run_once.add_argument("--execution-source", choices=["mt5", "bridge"])
     run_once.add_argument("--bridge-url")
@@ -60,7 +60,7 @@ def main() -> None:
     monitor.add_argument("--paper-state-path")
     monitor.add_argument("--sim-state-path")
     monitor.add_argument("--mode", choices=["paper", "live"])
-    monitor.add_argument("--analyst", choices=["none", "rule"])
+    monitor.add_argument("--analyst", choices=["none", "rule", "llm"])
     monitor.add_argument("--market-source", choices=["demo", "sim", "mt5", "bridge"])
     monitor.add_argument("--execution-source", choices=["mt5", "bridge"])
     monitor.add_argument("--bridge-url")
@@ -273,7 +273,7 @@ def _agent(settings: AgentSettings, bridge_client: BridgeClient) -> TradingAgent
         broker=_broker(settings.mode, settings.execution_source, bridge_client),
         memory=JsonlExperienceStore(settings.memory_path),
         paper_portfolio=PaperPortfolio(settings.paper_state_path) if settings.mode == "paper" else None,
-        analyst=_analyst(settings.analyst),
+        analyst=_analyst(settings),
     )
 
 
@@ -291,11 +291,18 @@ def _reconcile_for_cooldown(settings: AgentSettings, market: Any) -> list[Any]:
     return PaperPortfolio(settings.paper_state_path).reconcile(market)
 
 
-def _analyst(name: str) -> Any:
+def _analyst(settings: AgentSettings) -> Any:
+    name = settings.analyst
     if name == "none":
         return None
     if name == "rule":
         return RuleBasedAnalyst()
+    if name == "llm":
+        return LLMAnalyst(
+            model=settings.llm_model,
+            api_key_env=settings.llm_api_key_env,
+            timeout_seconds=settings.llm_timeout_seconds,
+        )
     if name == "noop":
         return NoOpAnalyst()
     raise ValueError(f"Unknown analyst: {name}")
