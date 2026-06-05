@@ -286,7 +286,8 @@ def test_web_control_page_unifies_market_agent_and_sse(tmp_path):
     html = app._control_page()
     payload = app._api("/api/control")
 
-    assert "Market Control" in html
+    assert "Live Market" in html
+    assert "Decision History" in html
     assert "control-market-candles" in html
     assert "new EventSource(\"/events\")" in html
     assert 'name="next" value="/control"' in html

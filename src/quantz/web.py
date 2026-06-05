@@ -408,11 +408,10 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
             f"""
             <div id="control-root">
               <section class="control-shell">
-                <div class="control-main">
+                <div class="control-main primary-panel">
                   <div class="control-header">
                     <div>
-                      <h2>Market Control</h2>
-                      <p>Live MT5 tick, current price level, and candle context in one surface.</p>
+                      <h2>Live Market</h2>
                     </div>
                     <strong id="control-stream-state" class="control-pill">connecting</strong>
                   </div>
@@ -434,19 +433,22 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
                   <div id="control-market-candles">{self._candlestick_chart(selected, chart.get("series", {}).get(selected, []), chart.get("overlays", {}).get(selected, {}))}</div>
                 </div>
                 <aside class="control-side">
-                  <div class="control-panel">
-                    <h2>Tick</h2>
-                    <div id="control-tick-status" class="control-status-list">{self._control_tick_status(summary)}</div>
-                    <div id="control-tick-chart">{self._tick_tape_chart(summary.get("ticks", []))}</div>
-                  </div>
-                  <div class="control-panel">
-                    <h2>Agent</h2>
+                  <div class="control-panel emphasis-panel">
+                    <h2>Agent Session</h2>
                     <div id="control-agent-strip" class="market-strip compact-strip">{self._agent_status_strip(agent)}</div>
                     <div id="control-agent-controls">{self._agent_controls(agent.get("monitor", {}), "/control")}</div>
                   </div>
                   <div class="control-panel">
-                    <h2>Reasoning</h2>
+                    <h2>Latest Decision</h2>
                     <div id="control-decision-card">{self._agent_decision_card(agent.get("latest_decision", {}))}</div>
+                  </div>
+                  <div class="control-panel compact-panel">
+                    <h2>Tick Health</h2>
+                    <div id="control-tick-status" class="control-status-list">{self._control_tick_status(summary)}</div>
+                    <details>
+                      <summary>Tick tape</summary>
+                      <div id="control-tick-chart">{self._tick_tape_chart(summary.get("ticks", []))}</div>
+                    </details>
                   </div>
                 </aside>
               </section>
@@ -460,16 +462,8 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
                   <div id="control-open-positions">{self._positions_table(agent.get("open_positions", []))}</div>
                 </div>
                 <div class="control-panel wide-panel">
-                  <h2>History</h2>
+                  <h2>Decision History</h2>
                   <div id="control-history">{self._decisions_table(agent.get("recent_decisions", []))}</div>
-                </div>
-                <div class="control-panel">
-                  <h2>Closed</h2>
-                  <div id="control-recent-closes">{self._closes_table(operations.get("recent_closes", []))}</div>
-                </div>
-                <div class="control-panel">
-                  <h2>Agent Events</h2>
-                  <div id="control-agent-events">{self._monitor_events_table(agent.get("monitor", {}).get("recent_events", []))}</div>
                 </div>
               </section>
             </div>
@@ -649,6 +643,10 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
     .legend-entry {{ background:#6b8cff !important; }}
     .control-shell {{ display:grid; grid-template-columns:minmax(0,1.65fr) 390px; gap:14px; align-items:start; }}
     .control-main,.control-panel {{ border:1px solid var(--line); border-radius:8px; background:#fff; padding:14px; min-width:0; }}
+    .primary-panel {{ box-shadow:0 1px 0 rgba(17,24,39,0.02); }}
+    .emphasis-panel {{ border-color:#b8d2c8; background:#fbfdfc; }}
+    .compact-panel details {{ margin-top:8px; }}
+    .compact-panel summary {{ cursor:pointer; color:var(--ink); font-weight:750; }}
     .control-header {{ display:flex; justify-content:space-between; gap:12px; align-items:start; margin-bottom:10px; }}
     .control-header p {{ margin:2px 0 0; }}
     .control-pill {{ display:inline-flex; align-items:center; min-height:28px; padding:5px 9px; border-radius:999px; background:#edf2f5; color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:0; }}
@@ -665,6 +663,7 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
     .control-status-list span {{ display:block; color:var(--muted); font-size:11px; font-weight:700; }}
     .control-status-list strong {{ display:block; margin-top:2px; font-size:14px; overflow-wrap:anywhere; }}
     #control-market-candles,#control-tick-chart {{ background:#0f1720; border:1px solid #263241; border-radius:8px; padding:10px; overflow-x:auto; }}
+    #control-tick-chart {{ margin-top:8px; }}
     #control-market-candles svg {{ display:block; width:100%; min-width:820px; }}
     #control-tick-chart svg {{ display:block; width:100%; min-width:360px; }}
     #control-decision-card .decision-card {{ grid-template-columns:1fr 1fr; }}
@@ -2013,8 +2012,10 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
             reasons = list(decision.get("reasons", []))
             reason_items = "".join(f"<li>{self._escape(reason)}</li>" for reason in reasons) if reasons else "<li>none</li>"
             execution = decision.get("execution") or "not sent"
+            llm_trace = self._llm_trace_details(decision.get("llm_trace", {}))
+            decision_key = decision.get("decision_id") or decision.get("timestamp_raw") or decision.get("timestamp") or ""
             rows.append(
-                '<article class="decision-history-item">'
+                f'<article class="decision-history-item" data-decision-key="{self._escape(decision_key)}">'
                 '<div class="decision-history-head">'
                 f'<div><span>Time</span><strong>{self._escape(decision.get("timestamp", ""))}</strong></div>'
                 f'<div><span>Symbol</span><strong>{self._escape(decision.get("symbol", ""))}</strong></div>'
@@ -2025,6 +2026,7 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
                 f'<div><span>Execution</span><strong>{self._escape(execution)}</strong></div>'
                 "</div>"
                 f'<div class="decision-history-reasons"><span>Reasons</span><ul>{reason_items}</ul></div>'
+                f"{llm_trace}"
                 "</article>"
             )
         return '<div class="decision-history">' + "".join(rows) + "</div>"
@@ -2474,6 +2476,7 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
         analyst = (decision.get("metadata") or {}).get("analyst") or {}
         raw_timestamp = decision.get("timestamp") or row.get("timestamp", "")
         return {
+            "decision_id": decision.get("decision_id", ""),
             "timestamp": self._format_local_time(raw_timestamp),
             "timestamp_raw": raw_timestamp,
             "symbol": decision.get("symbol", ""),
@@ -3909,6 +3912,13 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
   function decisionHistory(id, rows) {
     const root = $(id);
     if (!root) return;
+    const openTracePanels = new Set(
+      Array.from(root.querySelectorAll(".decision-history-item")).flatMap((item) =>
+        Array.from(item.querySelectorAll(".llm-trace details[open] summary")).map((node) =>
+          `${item.dataset.decisionKey || ""}:${node.textContent || ""}`
+        )
+      )
+    );
     clear(root);
     if (!rows || !rows.length) {
       const p = document.createElement("p");
@@ -3918,9 +3928,11 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
     }
     const list = document.createElement("div");
     list.className = "decision-history";
-    for (const row of rows) {
+    for (const [index, row] of rows.entries()) {
+      const decisionKey = row.decision_id || row.timestamp_raw || row.timestamp || String(index);
       const item = document.createElement("article");
       item.className = "decision-history-item";
+      item.dataset.decisionKey = decisionKey;
       const head = document.createElement("div");
       head.className = "decision-history-head";
       for (const [label, value] of [
@@ -3952,6 +3964,27 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
       }
       reasons.append(label, ul);
       item.append(head, reasons);
+      if (row.llm_trace && Object.keys(row.llm_trace).length) {
+        const trace = document.createElement("div");
+        trace.className = "llm-trace";
+        const title = document.createElement("span");
+        title.textContent = "LLM Trace";
+        trace.append(title);
+        for (const [summaryText, value] of [
+          ["Request sent to LLM", row.llm_trace.request || {}],
+          ["Response from LLM", row.llm_trace.response || {}],
+        ]) {
+          const details = document.createElement("details");
+          details.open = openTracePanels.has(`${decisionKey}:${summaryText}`);
+          const summary = document.createElement("summary");
+          summary.textContent = summaryText;
+          const pre = document.createElement("pre");
+          pre.textContent = JSON.stringify(value, null, 2);
+          details.append(summary, pre);
+          trace.append(details);
+        }
+        item.append(trace);
+      }
       list.append(item);
     }
     root.append(list);
