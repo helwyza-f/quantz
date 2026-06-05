@@ -180,6 +180,17 @@ def test_web_agent_page_shows_control_and_console(tmp_path):
                             "market_regime": "mixed",
                             "avoid_trade": True,
                             "risk_notes": ["llm_api_key_missing"],
+                            "metadata": {
+                                "llm_trace": {
+                                    "request": {
+                                        "model": "gpt-5.4-mini",
+                                        "input": {"market": {"symbol": "XAUUSD"}},
+                                    },
+                                    "response": {
+                                        "parsed": {"avoid_trade": True},
+                                    },
+                                }
+                            },
                         }
                     },
                 },
@@ -209,7 +220,10 @@ def test_web_agent_page_shows_control_and_console(tmp_path):
     assert payload["latest_decision"]["risk_status"] == "rejected"
     assert payload["latest_decision"]["analyst_model"] == "llm_analyst:gpt-5.4-mini"
     assert payload["latest_decision"]["analyst_risk_notes"] == ["llm_api_key_missing"]
+    assert payload["latest_decision"]["llm_trace"]["request"]["model"] == "gpt-5.4-mini"
     assert "Analyst Risk Notes" in html
+    assert "LLM Trace" in html
+    assert "Request sent to LLM" in html
 
 
 def test_web_control_page_unifies_market_agent_and_sse(tmp_path):

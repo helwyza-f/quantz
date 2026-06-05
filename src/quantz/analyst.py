@@ -129,10 +129,11 @@ class LLMAnalyst(Analyst):
 
     def analyze(self, context: AgentContext) -> AnalystOutput:
         api_key = os.getenv(self.api_key_env, "")
+        request_payload = self._request_payload(context)
         if not api_key and self.uses_openai:
-            return self._fail_closed("llm_api_key_missing")
+            return self._fail_closed("llm_api_key_missing", request_payload=request_payload)
         try:
-            payload = self.request_fn(self._request_payload(context))
+            payload = self.request_fn(request_payload)
             data = self._extract_json(payload)
             return AnalystOutput(
                 market_regime=str(data.get("market_regime", "unknown")),
@@ -142,9 +143,10 @@ class LLMAnalyst(Analyst):
                 reason_codes=[str(item) for item in data.get("reason_codes", [])][:8],
                 risk_notes=[str(item) for item in data.get("risk_notes", [])][:8],
                 model_version=self.model_version,
+                metadata={"llm_trace": self._trace(request_payload, data, payload)},
             )
         except Exception as exc:
-            return self._fail_closed(self._error_reason(exc))
+            return self._fail_closed(self._error_reason(exc), request_payload=request_payload)
 
     def _request_payload(self, context: AgentContext) -> dict[str, Any]:
         market = context.market
@@ -251,7 +253,42 @@ class LLMAnalyst(Analyst):
                     return json.loads(str(content.get("text", "{}")))
         raise ValueError("llm_response_missing_output_text")
 
-    def _fail_closed(self, reason: str) -> AnalystOutput:
+    def _trace(
+        self,
+        request_payload: dict[str, Any],
+        parsed_response: dict[str, Any] | None = None,
+        raw_response: dict[str, Any] | None = None,
+        error: str | None = None,
+    ) -> dict[str, Any]:
+        response: dict[str, Any] = {"parsed": parsed_response or {}}
+        if raw_response is not None:
+            response["raw_preview"] = self._json_preview(raw_response)
+        if error:
+            response["error"] = error
+        return {
+            "status": "error" if error else "ok",
+            "request": {
+                "model": request_payload.get("model", ""),
+                "instructions": request_payload.get("instructions", ""),
+                "input": self._decode_input(request_payload.get("input", "")),
+                "schema": request_payload.get("text", {}).get("format", {}).get("name", ""),
+                "max_output_tokens": request_payload.get("max_output_tokens", ""),
+            },
+            "response": response,
+        }
+
+    def _decode_input(self, value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return value
+
+    def _json_preview(self, value: Any, limit: int = 2000) -> str:
+        return json.dumps(value, default=str, sort_keys=True)[:limit]
+
+    def _fail_closed(self, reason: str, request_payload: dict[str, Any] | None = None) -> AnalystOutput:
         return AnalystOutput(
             market_regime="unknown",
             bias="neutral",
@@ -260,4 +297,7 @@ class LLMAnalyst(Analyst):
             reason_codes=["llm_analyst_unavailable"],
             risk_notes=[reason],
             model_version=self.model_version,
+            metadata={
+                "llm_trace": self._trace(request_payload or {"model": self.model}, error=reason),
+            },
         )

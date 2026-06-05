@@ -60,13 +60,19 @@ def test_llm_analyst_fails_closed_without_api_key(monkeypatch):
 
 
 def test_llm_analyst_reads_structured_response():
-    analyst = LLMAnalyst(
-        request_fn=lambda _payload: {
+    captured_payload = {}
+
+    def request_fn(payload):
+        captured_payload.update(payload)
+        return {
             "output_text": (
                 '{"market_regime":"trend","bias":"buy","confidence_adjustment":0.05,'
                 '"avoid_trade":false,"reason_codes":["llm_trend_confirmed"],"risk_notes":[]}'
             )
         }
+
+    analyst = LLMAnalyst(
+        request_fn=request_fn
     )
 
     analysis = analyst.analyze(context())
@@ -75,6 +81,9 @@ def test_llm_analyst_reads_structured_response():
     assert analysis.bias == "buy"
     assert analysis.confidence_adjustment == 0.05
     assert analysis.reason_codes == ["llm_trend_confirmed"]
+    assert analysis.metadata["llm_trace"]["request"]["model"] == captured_payload["model"]
+    assert analysis.metadata["llm_trace"]["request"]["input"]["market"]["symbol"] == "XAUUSD"
+    assert analysis.metadata["llm_trace"]["response"]["parsed"]["bias"] == "buy"
 
 
 def test_llm_analyst_reports_http_error_message():
@@ -91,3 +100,5 @@ def test_llm_analyst_reports_http_error_message():
 
     assert analysis.avoid_trade is True
     assert analysis.risk_notes == ["llm_http_error:400:Unsupported model"]
+    assert analysis.metadata["llm_trace"]["status"] == "error"
+    assert analysis.metadata["llm_trace"]["response"]["error"] == "llm_http_error:400:Unsupported model"

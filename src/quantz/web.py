@@ -626,6 +626,10 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
     .decision-card strong {{ display:block; margin-top:4px; font-size:15px; overflow-wrap:anywhere; }}
     .decision-reasons {{ grid-column:1 / -1; }}
     .decision-reasons ul {{ margin:8px 0 0; padding-left:18px; }}
+    .llm-trace {{ grid-column:1 / -1; }}
+    .llm-trace details {{ margin-top:8px; }}
+    .llm-trace summary {{ cursor:pointer; color:var(--ink); font-weight:750; }}
+    .llm-trace pre {{ margin:8px 0 0; max-height:360px; font-size:12px; }}
     .decision-history {{ display:grid; gap:10px; }}
     .decision-history-item {{ border:1px solid var(--line); border-radius:8px; padding:12px; background:#fff; min-width:0; }}
     .decision-history-head {{ display:grid; grid-template-columns:1.2fr 0.75fr 0.75fr 0.75fr 0.9fr; gap:8px; align-items:start; }}
@@ -1788,6 +1792,7 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
         reason_items = "".join(f"<li>{self._escape(reason)}</li>" for reason in reasons) if reasons else "<li>none</li>"
         risk_notes = decision.get("analyst_risk_notes", [])
         risk_note_items = "".join(f"<li>{self._escape(note)}</li>" for note in risk_notes) if risk_notes else "<li>none</li>"
+        llm_trace = self._llm_trace_details(decision.get("llm_trace", {}))
         return f"""
         <div class="decision-card">
           <div><span>Time</span><strong>{self._escape(decision.get("timestamp", ""))}</strong></div>
@@ -1802,6 +1807,28 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
           <div><span>Avoid</span><strong>{self._escape(decision.get("analyst_avoid_trade", ""))}</strong></div>
           <div class="decision-reasons"><span>Reasons</span><ul>{reason_items}</ul></div>
           <div class="decision-reasons"><span>Analyst Risk Notes</span><ul>{risk_note_items}</ul></div>
+          {llm_trace}
+        </div>
+        """
+
+    def _llm_trace_details(self, trace: dict[str, Any]) -> str:
+        if not trace:
+            return ""
+        request_payload = trace.get("request", {})
+        response_payload = trace.get("response", {})
+        request_json = json.dumps(request_payload, indent=2, sort_keys=True, default=str)
+        response_json = json.dumps(response_payload, indent=2, sort_keys=True, default=str)
+        return f"""
+        <div class="llm-trace">
+          <span>LLM Trace</span>
+          <details>
+            <summary>Request sent to LLM</summary>
+            <pre>{self._escape(request_json)}</pre>
+          </details>
+          <details>
+            <summary>Response from LLM</summary>
+            <pre>{self._escape(response_json)}</pre>
+          </details>
         </div>
         """
 
@@ -2460,6 +2487,7 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
             "analyst_regime": analyst.get("market_regime", ""),
             "analyst_avoid_trade": analyst.get("avoid_trade", ""),
             "analyst_risk_notes": analyst.get("risk_notes", []),
+            "llm_trace": (analyst.get("metadata") or {}).get("llm_trace", {}),
         }
 
     def _position_row(self, row: dict[str, Any]) -> dict[str, Any]:
@@ -3851,6 +3879,26 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
     }
     notes.append(notesSpan, notesList);
     card.append(notes);
+    if (decision.llm_trace && Object.keys(decision.llm_trace).length) {
+      const trace = document.createElement("div");
+      trace.className = "llm-trace";
+      const title = document.createElement("span");
+      title.textContent = "LLM Trace";
+      trace.append(title);
+      for (const [summaryText, value] of [
+        ["Request sent to LLM", decision.llm_trace.request || {}],
+        ["Response from LLM", decision.llm_trace.response || {}],
+      ]) {
+        const details = document.createElement("details");
+        const summary = document.createElement("summary");
+        summary.textContent = summaryText;
+        const pre = document.createElement("pre");
+        pre.textContent = JSON.stringify(value, null, 2);
+        details.append(summary, pre);
+        trace.append(details);
+      }
+      card.append(trace);
+    }
     root.append(card);
   }
 

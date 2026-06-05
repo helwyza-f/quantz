@@ -74,6 +74,7 @@ class AnalystOutput:
     reason_codes: list[str] = field(default_factory=list)
     risk_notes: list[str] = field(default_factory=list)
     model_version: str = "analyst_v1"
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
