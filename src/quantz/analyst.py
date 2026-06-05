@@ -5,6 +5,7 @@ import os
 import urllib.request
 from abc import ABC, abstractmethod
 from typing import Any, Callable
+from urllib.error import HTTPError, URLError
 
 from quantz.models import AgentContext, AnalystOutput
 
@@ -143,7 +144,7 @@ class LLMAnalyst(Analyst):
                 model_version=self.model_version,
             )
         except Exception as exc:
-            return self._fail_closed(f"llm_error:{type(exc).__name__}")
+            return self._fail_closed(self._error_reason(exc))
 
     def _request_payload(self, context: AgentContext) -> dict[str, Any]:
         market = context.market
@@ -215,6 +216,31 @@ class LLMAnalyst(Analyst):
         )
         with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
             return json.loads(response.read().decode("utf-8"))
+
+    def _error_reason(self, exc: Exception) -> str:
+        if isinstance(exc, HTTPError):
+            body = ""
+            try:
+                body = exc.read().decode("utf-8", errors="replace")
+            except Exception:
+                body = ""
+            message = self._http_error_message(body)
+            suffix = f":{message}" if message else ""
+            return f"llm_http_error:{exc.code}{suffix}"
+        if isinstance(exc, URLError):
+            return f"llm_url_error:{exc.reason}"
+        return f"llm_error:{type(exc).__name__}"
+
+    def _http_error_message(self, body: str) -> str:
+        if not body:
+            return ""
+        try:
+            payload = json.loads(body)
+            error = payload.get("error", {})
+            message = str(error.get("message", "") or error.get("code", ""))
+        except Exception:
+            message = body
+        return message.replace("\n", " ").replace("\r", " ")[:220]
 
     def _extract_json(self, payload: dict[str, Any]) -> dict[str, Any]:
         if "output_text" in payload:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import json
+import sys
 import threading
 from collections import deque
 from dataclasses import replace
@@ -4362,10 +4363,18 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
         return html.escape(str(value), quote=True)
 
 
+class QuietThreadingHTTPServer(ThreadingHTTPServer):
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (BrokenPipeError, ConnectionAbortedError, ConnectionResetError)):
+            return
+        super().handle_error(request, client_address)
+
+
 def serve(host: str = "127.0.0.1", port: int = 8787, root: str | Path = ".", monitor_fn: Any | None = None) -> None:
     app = WebApp(root, monitor_fn=monitor_fn)
     app.start_tick_collector(interval_seconds=1.0)
-    server = ThreadingHTTPServer((host, port), app.handler())
+    server = QuietThreadingHTTPServer((host, port), app.handler())
     print(f"Quantz web UI listening on http://{host}:{port}")
     try:
         server.serve_forever()

@@ -1,3 +1,6 @@
+from io import BytesIO
+from urllib.error import HTTPError
+
 from quantz.analyst import LLMAnalyst, RuleBasedAnalyst
 from quantz.models import AccountState, AgentContext, MarketSnapshot, TradeAction
 from quantz.planner import VariableDrivenPlanner
@@ -72,3 +75,19 @@ def test_llm_analyst_reads_structured_response():
     assert analysis.bias == "buy"
     assert analysis.confidence_adjustment == 0.05
     assert analysis.reason_codes == ["llm_trend_confirmed"]
+
+
+def test_llm_analyst_reports_http_error_message():
+    def request_fn(_payload):
+        raise HTTPError(
+            url="https://api.openai.com/v1/responses",
+            code=400,
+            msg="Bad Request",
+            hdrs=None,
+            fp=BytesIO(b'{"error":{"message":"Unsupported model"}}'),
+        )
+
+    analysis = LLMAnalyst(request_fn=request_fn).analyze(context())
+
+    assert analysis.avoid_trade is True
+    assert analysis.risk_notes == ["llm_http_error:400:Unsupported model"]
