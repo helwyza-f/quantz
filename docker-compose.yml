@@ -1,0 +1,33 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: quantz-backend
+    environment:
+      PYTHONPATH: src
+      QUANTZ_ROOT: /app
+      QUANTZ_DB_PATH: /app/data/quantz.db
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    ports:
+      - "8787:8787"
+    volumes:
+      - quantz_data:/app/data
+      - ./configs:/app/configs
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      args:
+        NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE:-http://127.0.0.1:8787}
+    container_name: quantz-frontend
+    depends_on:
+      - backend
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+
+volumes:
+  quantz_data:

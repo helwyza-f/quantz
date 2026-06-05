@@ -101,6 +101,17 @@ label {
   text-transform: uppercase;
 }
 
+.pill.compact {
+  align-self: start;
+  font-size: 11px;
+  padding: 5px 8px;
+}
+
+.pill.muted {
+  background: #edf2f5;
+  color: var(--muted);
+}
+
 .grid {
   display: grid;
   gap: 14px;
@@ -131,6 +142,17 @@ label {
 .panel h2 {
   margin: 0 0 12px;
   font-size: 17px;
+}
+
+.panel-title-row {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.panel-title-row h2 {
+  margin-bottom: 0;
 }
 
 .wide {
@@ -204,10 +226,45 @@ label {
 
 .actions {
   display: grid;
-  grid-template-columns: 1fr 0.8fr 0.8fr auto;
+  grid-template-columns: 1fr 0.8fr;
   gap: 8px;
   align-items: end;
   margin-top: 12px;
+}
+
+.settings-form {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.settings-form .form-grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 1fr 1fr;
+}
+
+.check-row {
+  align-items: center;
+  color: var(--ink);
+  display: flex;
+  gap: 8px;
+}
+
+.check-row input {
+  margin: 0;
+  width: auto;
+}
+
+.settings-note,
+.feedback {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 0;
+}
+
+.feedback {
+  margin-top: 10px;
 }
 
 .decision-grid {
@@ -261,6 +318,10 @@ label {
   white-space: pre-wrap;
 }
 
+.history-item .trace pre {
+  max-height: 240px;
+}
+
 table {
   border-collapse: collapse;
   width: 100%;
@@ -298,7 +359,8 @@ th {
   .actions,
   .strip,
   .decision-grid,
-  .history-head {
+  .history-head,
+  .settings-form .form-grid {
     grid-template-columns: 1fr;
   }
 }

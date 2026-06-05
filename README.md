@@ -140,6 +140,23 @@ npm.cmd run dev
 
 Open `http://127.0.0.1:3000/control`.
 
+Run the production-shaped Docker stack:
+
+```bash
+cp .env.example .env
+docker compose up --build
+```
+
+Open `http://127.0.0.1:3000/control`.
+
+The compose stack runs:
+
+- `quantz-backend`: FastAPI on `http://127.0.0.1:8787`
+- `quantz-frontend`: Next.js production server on `http://127.0.0.1:3000`
+- `quantz_data`: persistent Docker volume for `data/quantz.db`
+
+Runtime settings are stored in SQLite at `data/quantz.db` inside the backend container. Use the Control page `Runtime Settings` panel to set the default agent config, symbol, decision cadence, max decisions, and OpenAI API key. Do not commit real API keys into `.env` or source files.
+
 If port `8787` is already used by the legacy Python web UI, run the FastAPI backend on another port and point Next.js to it:
 
 ```powershell

@@ -1,8 +1,9 @@
 "use client";
 
+import type { FormEvent } from "react";
 import { useEffect, useMemo, useState } from "react";
 import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
-import { API_BASE, getJson, postJson, type Dict } from "@/lib/api";
+import { API_BASE, getJson, postJson, putJson, type Dict } from "@/lib/api";
 import { MarketChart } from "@/components/MarketChart";
 
 type ControlPayload = {
@@ -12,6 +13,20 @@ type ControlPayload = {
   chart?: Dict;
   ticks?: Dict[];
   stream?: Dict;
+  settings?: AppSettings;
+};
+
+type AppSettings = {
+  configs?: string[];
+  default_agent_config?: string;
+  default_symbol?: string;
+  max_decisions?: number;
+  decision_gap_seconds?: number;
+  openai_api_key_set?: boolean;
+  openai_api_key_source?: string;
+  openai_api_key_preview?: string;
+  database_path?: string;
+  updated_at?: string;
 };
 
 const timeframes = ["M1", "M5", "M15", "M30", "H1", "H4", "D1"];
@@ -32,10 +47,17 @@ function ControlDashboardInner() {
   const [candles, setCandles] = useState(80);
   const [status, setStatus] = useState("connecting");
   const [error, setError] = useState("");
+  const [sessionBusy, setSessionBusy] = useState(false);
+  const [sessionMessage, setSessionMessage] = useState("");
 
   const controlQuery = useQuery({
     queryKey: ["control"],
     queryFn: () => getJson<ControlPayload>("/api/control?chart=true"),
+  });
+
+  const settingsQuery = useQuery({
+    queryKey: ["settings"],
+    queryFn: () => getJson<AppSettings>("/api/settings"),
   });
 
   const payload = useMemo<ControlPayload | null>(() => {
@@ -76,6 +98,7 @@ function ControlDashboardInner() {
   const agent = payload?.agent || {};
   const monitor = (agent.monitor || {}) as Dict;
   const latest = (agent.latest_decision || {}) as Dict;
+  const settings = settingsQuery.data || payload?.settings || {};
   const chart = useMemo(() => (payload?.chart || {}) as Dict, [payload?.chart]);
   const selectedSymbol = ((chart.symbols as string[] | undefined) || ["XAUUSD"])[0] || "XAUUSD";
 
@@ -91,21 +114,41 @@ function ControlDashboardInner() {
 
   async function startSession() {
     setError("");
-    await postJson("/api/agent/start", {
-      config: "mt5-demo-live.json",
-      max_iterations: 100,
-      interval_seconds: 1,
-      trigger_mode: "stream",
-    });
-    await controlQuery.refetch();
-    await loadControl(false);
+    setSessionBusy(true);
+    setSessionMessage("Starting agent session...");
+    try {
+      await postJson("/api/agent/start", {
+        config: settings.default_agent_config,
+        max_iterations: settings.max_decisions || 100,
+        interval_seconds: settings.decision_gap_seconds || 1,
+        trigger_mode: "stream",
+      });
+      setSessionMessage("Agent session running.");
+      await controlQuery.refetch();
+      await loadControl(false);
+    } catch (exc) {
+      setSessionMessage("");
+      setError(String(exc));
+    } finally {
+      setSessionBusy(false);
+    }
   }
 
   async function stopSession() {
     setError("");
-    await postJson("/api/agent/stop");
-    await controlQuery.refetch();
-    await loadControl(false);
+    setSessionBusy(true);
+    setSessionMessage("Stopping agent session...");
+    try {
+      await postJson("/api/agent/stop");
+      setSessionMessage("Agent session stopped.");
+      await controlQuery.refetch();
+      await loadControl(false);
+    } catch (exc) {
+      setSessionMessage("");
+      setError(String(exc));
+    } finally {
+      setSessionBusy(false);
+    }
   }
 
   return (
@@ -204,6 +247,15 @@ function ControlDashboardInner() {
         </div>
 
         <aside className="grid">
+          <SettingsPanel
+            settings={settings}
+            loading={settingsQuery.isLoading}
+            onSaved={async () => {
+              await settingsQuery.refetch();
+              await loadControl(false);
+            }}
+          />
+
           <section className="panel emphasis">
             <h2>Agent Session</h2>
             <MetricStrip
@@ -217,13 +269,14 @@ function ControlDashboardInner() {
               ]}
             />
             <div className="actions">
-              <button onClick={startSession} disabled={Boolean(monitor.running)}>
+              <button onClick={startSession} disabled={Boolean(monitor.running) || sessionBusy}>
                 Start Session
               </button>
-              <button className="secondary" onClick={stopSession} disabled={!monitor.running}>
+              <button className="secondary" onClick={stopSession} disabled={!monitor.running || sessionBusy}>
                 Stop
               </button>
             </div>
+            {sessionMessage ? <p className="feedback">{sessionMessage}</p> : null}
           </section>
 
           <section className="panel">
@@ -260,6 +313,96 @@ function ControlDashboardInner() {
         </section>
       </section>
     </main>
+  );
+}
+
+function SettingsPanel({
+  settings,
+  loading,
+  onSaved,
+}: {
+  settings: AppSettings;
+  loading: boolean;
+  onSaved: () => Promise<void>;
+}) {
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState("");
+  const configs = settings.configs?.length ? settings.configs : ["mt5-demo-live.json"];
+
+  async function saveSettings(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const formElement = event.currentTarget;
+    setSaving(true);
+    setMessage("Saving settings...");
+    const form = new FormData(formElement);
+    try {
+      await putJson<AppSettings>("/api/settings", {
+        default_agent_config: String(form.get("default_agent_config") || settings.default_agent_config || "mt5-demo-live.json"),
+        default_symbol: String(form.get("default_symbol") || settings.default_symbol || "XAUUSD"),
+        max_decisions: Number(form.get("max_decisions") || settings.max_decisions || 100),
+        decision_gap_seconds: Number(form.get("decision_gap_seconds") || settings.decision_gap_seconds || 1),
+        openai_api_key: String(form.get("openai_api_key") || ""),
+        clear_openai_api_key: Boolean(form.get("clear_openai_api_key")),
+      });
+      setMessage("Settings saved.");
+      await onSaved();
+      formElement.reset();
+    } catch (exc) {
+      setMessage(`Save failed: ${String(exc)}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <section className="panel">
+      <div className="panel-title-row">
+        <h2>Runtime Settings</h2>
+        <span className={settings.openai_api_key_set ? "pill compact" : "pill compact muted"}>{settings.openai_api_key_set ? "LLM ready" : "No key"}</span>
+      </div>
+      <form className="settings-form" key={settings.updated_at || "settings"} onSubmit={saveSettings}>
+        <label>
+          OpenAI API key
+          <input name="openai_api_key" type="password" autoComplete="off" placeholder={settings.openai_api_key_set ? "paste new key to replace" : "paste key here"} />
+        </label>
+        <div className="settings-note">
+          Source: <strong>{settings.openai_api_key_source || "missing"}</strong>
+          {settings.openai_api_key_preview ? ` (${settings.openai_api_key_preview})` : ""}
+        </div>
+        <label className="check-row">
+          <input name="clear_openai_api_key" type="checkbox" value="true" />
+          Clear stored key
+        </label>
+        <div className="form-grid">
+          <label>
+            Agent config
+            <select name="default_agent_config" defaultValue={settings.default_agent_config || configs[0]}>
+              {configs.map((config) => (
+                <option key={config} value={config}>
+                  {config}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Symbol
+            <input name="default_symbol" defaultValue={settings.default_symbol || "XAUUSD"} />
+          </label>
+          <label>
+            Max decisions
+            <input name="max_decisions" type="number" min={1} max={10000} defaultValue={settings.max_decisions || 100} />
+          </label>
+          <label>
+            Decision gap
+            <input name="decision_gap_seconds" type="number" min={0.1} max={3600} step={0.1} defaultValue={settings.decision_gap_seconds || 1} />
+          </label>
+        </div>
+        <button type="submit" disabled={saving || loading}>
+          {saving ? "Saving..." : "Save Settings"}
+        </button>
+      </form>
+      {message ? <p className="feedback">{message}</p> : null}
+    </section>
   );
 }
 

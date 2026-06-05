@@ -1,0 +1,12 @@
+.git
+.pytest_cache
+.venv
+**/__pycache__
+**/*.pyc
+data
+frontend/.next
+frontend/node_modules
+node_modules
+npm-debug.log
+Dockerfile*
+docker-compose*.yml
