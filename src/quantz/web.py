@@ -2037,7 +2037,7 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
         width = 1080
         height = 560
         left = 68
-        right = 86
+        right = 126
         top = 48
         bottom = 72
         plot_width = width - left - right
@@ -2164,6 +2164,20 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
                 title = f"open {position.get('side')} {label}: {position[key]}"
                 nodes.append(f'<line x1="{left}" y1="{y:.2f}" x2="{right_x}" y2="{y:.2f}" stroke="{color}" stroke-width="1.5" stroke-dasharray="5 4"><title>{self._escape(title)}</title></line>')
                 nodes.append(f'<text x="{right_x - 80}" y="{y - 4:.2f}" fill="{color}" font-size="11">{self._escape(label)}</text>')
+        current_tick = overlays.get("current_tick", {})
+        for key, label, color, dash in [
+            ("bid", "BID", "#22c55e", ""),
+            ("ask", "ASK", "#ef4444", "6 4"),
+        ]:
+            if current_tick.get(key) is None:
+                continue
+            value = float(current_tick[key])
+            y = y_for(value)
+            label_y = max(top + 16, min(top + plot_height - 8, y))
+            dash_attr = f' stroke-dasharray="{dash}"' if dash else ""
+            nodes.append(f'<line x1="{left}" y1="{y:.2f}" x2="{right_x}" y2="{y:.2f}" stroke="{color}" stroke-width="2"{dash_attr}></line>')
+            nodes.append(f'<rect x="{right_x + 6}" y="{label_y - 14:.2f}" width="108" height="20" rx="4" fill="{color}"></rect>')
+            nodes.append(f'<text x="{right_x + 11}" y="{label_y + 1:.2f}" fill="#fff" font-size="11" font-weight="800">{label} {value:.3f}</text>')
         signals = overlays.get("signals", [])
         if signals:
             display_count = min(len(signals), max(len(candles), 1), 12)
@@ -2550,7 +2564,8 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
         processed_keys: set[tuple[str, str, str, str]] = set()
         iteration = 0
         last_decision_at: datetime | None = None
-        started_after = datetime.now(timezone.utc)
+        with self.monitor_lock:
+            started_after = self._parse_datetime(self.monitor_state.get("started_at")) or datetime.now(timezone.utc)
         try:
             while iteration < max_iterations:
                 if stop_event.is_set():
@@ -2915,6 +2930,8 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
   let marketTimeframe = "H1";
   let tickTapeLimit = 120;
   let controlChartState = null;
+  let controlChartCache = new Map();
+  let controlChartRequestId = 0;
 
   function clear(node) {
     while (node.firstChild) node.removeChild(node.firstChild);
@@ -3183,7 +3200,7 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
     root.append(svg);
   }
 
-  function candlestickChart(id, symbol, candles, overlays = {}) {
+  function candlestickChart(id, symbol, candles, overlays = {}, visibleLimit = marketCandleLimit) {
     const root = $(id);
     if (!root) return;
     clear(root);
@@ -3193,7 +3210,7 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
       root.append(p);
       return;
     }
-    const selected = candles.slice(-marketCandleLimit);
+    const selected = candles.slice(-visibleLimit);
     const indicators = (overlays.indicators || []).slice(-selected.length);
     const highs = selected.map((row) => Number(row.high ?? row.close ?? 0));
     const lows = selected.map((row) => Number(row.low ?? row.close ?? 0));
@@ -3231,7 +3248,7 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
     const upper = Math.max(...highs);
     const lower = Math.min(...lows);
     const span = upper - lower || 1;
-    const width = 1080, height = 560, left = 68, right = 86, top = 48, bottom = 72;
+    const width = 1080, height = 560, left = 68, right = 126, top = 48, bottom = 72;
     const plotWidth = width - left - right;
     const plotHeight = height - top - bottom;
     const count = Math.max(selected.length - 1, 1);
@@ -3351,6 +3368,7 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
       if (currentTick[key] === undefined || currentTick[key] === null) continue;
       const value = Number(currentTick[key]);
       const y = yFor(value);
+      const labelY = Math.max(top + 16, Math.min(top + plotHeight - 8, y));
       const line = svgEl("line");
       line.setAttribute("x1", left);
       line.setAttribute("y1", y);
@@ -3363,7 +3381,22 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
       titleNode.textContent = `${label} ${value}`;
       line.append(titleNode);
       svg.append(line);
-      addSvgText(svg, `${label} ${value}`, width - right - 92, y - 5, "market-signal-label");
+      const badge = svgEl("rect");
+      badge.setAttribute("x", width - right + 6);
+      badge.setAttribute("y", labelY - 14);
+      badge.setAttribute("width", 108);
+      badge.setAttribute("height", 20);
+      badge.setAttribute("rx", 4);
+      badge.setAttribute("fill", color);
+      svg.append(badge);
+      const text = svgEl("text");
+      text.setAttribute("x", width - right + 11);
+      text.setAttribute("y", labelY + 1);
+      text.setAttribute("fill", "#ffffff");
+      text.setAttribute("font-size", "11");
+      text.setAttribute("font-weight", "800");
+      text.textContent = `${label} ${value.toFixed(3)}`;
+      svg.append(text);
     }
     const signals = overlays.signals || [];
     if (signals.length) {
@@ -3805,12 +3838,18 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
     controlChartState = chart;
     const select = $("control-symbol-select");
     const selected = (select && select.value) || (chart.symbols || [])[0] || "";
-    const count = ((chart.series || {})[selected] || []).length;
+    const candleInput = $("control-candle-limit");
+    const visibleLimit = Math.max(20, Math.min(300, Number(candleInput && candleInput.value ? candleInput.value : 80)));
+    if (candleInput) candleInput.value = visibleLimit;
+    const series = (chart.series || {})[selected] || [];
+    const count = Math.min(series.length, visibleLimit);
     if ($("control-chart-source")) $("control-chart-source").textContent = chart.source || "";
     if ($("control-selected-symbol")) $("control-selected-symbol").textContent = selected;
     if ($("control-candle-count")) $("control-candle-count").textContent = count;
     if ($("control-timeframe-label")) $("control-timeframe-label").textContent = chart.timeframe || "";
-    candlestickChart("control-market-candles", selected, (chart.series || {})[selected] || [], (chart.overlays || {})[selected] || {});
+    const key = `${selected}:${chart.timeframe || ""}`;
+    if (series.length) controlChartCache.set(key, chart);
+    candlestickChart("control-market-candles", selected, series, (chart.overlays || {})[selected] || {}, visibleLimit);
   }
 
   function updateControlChartFromTick(tick) {
@@ -3848,17 +3887,30 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
     };
     controlChartState = { ...controlChartState, source: "mt5_ohlc_history + ea_socket_live_tick", series, overlays };
     if ($("control-chart-source")) $("control-chart-source").textContent = controlChartState.source;
-    candlestickChart("control-market-candles", selected, candles, overlays[selected] || {});
+    candlestickChart("control-market-candles", selected, candles, overlays[selected] || {}, Math.max(20, Math.min(300, Number($("control-candle-limit")?.value || 80))));
   }
 
-  async function refreshControlChart() {
+  async function refreshControlChart(options = {}) {
     if (!$("control-market-candles")) return;
+    const forceFetch = Boolean(options.forceFetch);
     const timeframeSelect = $("control-timeframe-select");
+    const symbolSelect = $("control-symbol-select");
     const candleInput = $("control-candle-limit");
+    const selected = symbolSelect ? symbolSelect.value : ((controlChartState?.symbols || [])[0] || "");
     const timeframe = timeframeSelect ? timeframeSelect.value : "H1";
     const candles = Math.max(20, Math.min(300, Number(candleInput && candleInput.value ? candleInput.value : 80)));
     if (candleInput) candleInput.value = candles;
-    const chart = await fetch(`/api/market-chart?timeframe=${encodeURIComponent(timeframe)}&candles=${candles}`).then((res) => res.json());
+    const cacheKey = `${selected}:${timeframe}`;
+    const cached = controlChartCache.get(cacheKey);
+    const cachedSeries = cached ? ((cached.series || {})[selected] || []) : [];
+    if (!forceFetch && cached && cachedSeries.length >= candles) {
+      renderControlChart(cached);
+      return;
+    }
+    const requestId = ++controlChartRequestId;
+    if ($("control-chart-source")) $("control-chart-source").textContent = "loading candles...";
+    const chart = await fetch(`/api/market-chart?timeframe=${encodeURIComponent(timeframe)}&candles=300`).then((res) => res.json());
+    if (requestId !== controlChartRequestId) return;
     renderControlChart(chart);
   }
 
@@ -3943,10 +3995,10 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
     const candleInput = $("control-candle-limit");
     const timeframeSelect = $("control-timeframe-select");
     if ($("control-symbol-select")) {
-      $("control-symbol-select").addEventListener("change", refreshControlChart);
+      $("control-symbol-select").addEventListener("change", () => refreshControlChart({ forceFetch: true }));
     }
     if (timeframeSelect) {
-      timeframeSelect.addEventListener("change", refreshControlChart);
+      timeframeSelect.addEventListener("change", () => refreshControlChart({ forceFetch: true }));
     }
     if (candleInput) {
       candleInput.addEventListener("change", refreshControlChart);
@@ -3969,9 +4021,10 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
       $("control-reset-view").addEventListener("click", () => {
         if (candleInput) candleInput.value = 80;
         if (timeframeSelect) timeframeSelect.value = "H1";
-        refreshControlChart();
+        refreshControlChart({ forceFetch: true });
       });
     }
+    refreshControlChart({ forceFetch: true });
     connectControlStream();
   }
 })();
