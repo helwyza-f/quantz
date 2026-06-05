@@ -2,7 +2,7 @@ import json
 import time
 
 from quantz.web import WebApp
-from quantz.models import ExecutionResult, MarketSnapshot, OrderRequest, OrderSide
+from quantz.models import AccountState, ExecutionResult, MarketSnapshot, OrderRequest, OrderSide
 from quantz.paper import PaperPortfolio
 
 
@@ -145,6 +145,113 @@ def test_web_operations_page_shows_agent_status(tmp_path):
     assert "/api/monitor" in html
     assert "/api/operations" in html
     assert "setInterval(refreshLivePanels" in html
+
+
+def test_web_agent_page_shows_control_and_console(tmp_path):
+    configs = tmp_path / "configs"
+    configs.mkdir()
+    (configs / "mt5-paper.json").write_text(
+        json.dumps(
+            {
+                "symbols": ["XAUUSD"],
+                "market_source": "mt5",
+                "mode": "paper",
+                "memory_path": "data/mt5-paper-experience.jsonl",
+                "paper_state_path": "data/mt5-paper-state.json",
+            }
+        ),
+        encoding="utf-8",
+    )
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "mt5-paper-experience.jsonl").write_text(
+        json.dumps(
+            {
+                "decision": {
+                    "timestamp": "2026-06-05T00:00:00+00:00",
+                    "symbol": "XAUUSD",
+                    "action": "hold",
+                    "confidence": 0.4,
+                    "reason_codes": ["spread_too_wide"],
+                },
+                "risk": {"status": "rejected", "reasons": ["planner_chose_hold"]},
+                "execution": None,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (data / "mt5-paper-state.json").write_text(
+        json.dumps({"open_positions": [], "closed_positions": []}),
+        encoding="utf-8",
+    )
+
+    app = WebApp(tmp_path)
+    html = app._agent_page()
+    payload = app._api("/api/agent-console")
+
+    assert "Agent Control" in html
+    assert "Decision Console" in html
+    assert "Start Agent" in html
+    assert payload["config"] == "mt5-paper.json"
+    assert payload["latest_decision"]["action"] == "hold"
+    assert payload["latest_decision"]["risk_status"] == "rejected"
+
+
+def test_web_control_page_unifies_market_agent_and_sse(tmp_path):
+    configs = tmp_path / "configs"
+    configs.mkdir()
+    (configs / "mt5-paper.json").write_text(
+        json.dumps(
+            {
+                "symbols": ["XAUUSD"],
+                "market_source": "mt5",
+                "mode": "paper",
+                "memory_path": "data/mt5-paper-experience.jsonl",
+                "paper_state_path": "data/mt5-paper-state.json",
+            }
+        ),
+        encoding="utf-8",
+    )
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "mt5-paper-experience.jsonl").write_text(
+        json.dumps(
+            {
+                "decision": {
+                    "timestamp": "2026-06-05T00:00:00+00:00",
+                    "symbol": "XAUUSD",
+                    "action": "hold",
+                    "confidence": 0.4,
+                    "reason_codes": ["spread_too_wide"],
+                },
+                "risk": {"status": "rejected", "reasons": ["planner_chose_hold"]},
+                "execution": None,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (data / "mt5-paper-state.json").write_text(
+        json.dumps({"open_positions": [], "closed_positions": []}),
+        encoding="utf-8",
+    )
+
+    app = WebApp(tmp_path)
+    app._record_live_ticks(
+        [{"symbol": "XAUUSD", "bid": 100.1, "ask": 100.2, "mid": 100.15, "spread_points": 10, "tick_time": 1780650000}]
+    )
+
+    html = app._control_page()
+    payload = app._api("/api/control")
+
+    assert "Market Control" in html
+    assert "control-market-candles" in html
+    assert "new EventSource(\"/events\")" in html
+    assert payload["stream"]["transport"] == "sse"
+    assert payload["stream"]["browser_polling"] is False
+    assert payload["live"]["latest_tick"]["symbol"] == "XAUUSD"
+    assert payload["agent"]["latest_decision"]["action"] == "hold"
 
 
 def test_web_pnl_summary_groups_symbol_performance_and_reasons(tmp_path):
@@ -378,6 +485,268 @@ def test_web_market_chart_reads_simulated_candles(tmp_path):
     assert "market-ma-fast" in html
     assert "market-atr" in html
     assert "<svg" in html
+
+
+def test_web_market_page_shows_live_mt5_panel_when_disabled(tmp_path):
+    configs = tmp_path / "configs"
+    configs.mkdir()
+    (configs / "paper-demo.json").write_text(
+        json.dumps({"symbols": ["XAUUSD"], "market_source": "sim"}),
+        encoding="utf-8",
+    )
+
+    app = WebApp(tmp_path)
+    payload = app._api("/api/live-market")
+    html = app._market_page()
+
+    assert payload["status"] == "disabled"
+    assert "market-live-strip" in html
+    assert "Tick Tape" in html
+    assert "tick-tape-table" not in html
+    assert "/api/live-market" in html
+
+
+def test_web_live_market_summary_reads_mt5_feed(tmp_path, monkeypatch):
+    configs = tmp_path / "configs"
+    configs.mkdir()
+    (configs / "mt5-paper.json").write_text(
+        json.dumps({"symbols": ["XAUUSD"], "market_source": "mt5", "mode": "paper"}),
+        encoding="utf-8",
+    )
+
+    class FakeConnection:
+        pass
+
+    class FakeMarketFeed:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def snapshot(self, symbol):
+            return MarketSnapshot(
+                symbol=symbol,
+                bid=100.1,
+                ask=100.2,
+                spread_points=10,
+                atr_points=120,
+                trend_score=0.7,
+                volatility_score=0.5,
+                session="test",
+                features={"last_tick_time": 123, "rates_loaded": 64},
+            )
+
+    class FakeAccountFeed:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def state(self):
+            return AccountState(equity=50, balance=50, free_margin=45, open_positions=1)
+
+    monkeypatch.setattr("quantz.web.Mt5Connection", FakeConnection)
+    monkeypatch.setattr("quantz.web.Mt5MarketFeed", FakeMarketFeed)
+    monkeypatch.setattr("quantz.web.Mt5AccountFeed", FakeAccountFeed)
+
+    payload = WebApp(tmp_path)._api("/api/live-market")
+
+    assert payload["status"] == "connected"
+    assert payload["account"]["equity"] == 50
+    assert payload["ticks"][0]["symbol"] == "XAUUSD"
+    assert payload["ticks"][0]["bid"] == 100.1
+    assert payload["recent_ticks"][0]["symbol"] == "XAUUSD"
+    assert (tmp_path / "data" / "mt5-ticks.jsonl").exists()
+
+
+def test_web_live_market_tick_tape_deduplicates_ticks(tmp_path):
+    configs = tmp_path / "configs"
+    configs.mkdir()
+    (configs / "paper-demo.json").write_text(json.dumps({"symbols": ["XAUUSD"]}), encoding="utf-8")
+    app = WebApp(tmp_path)
+
+    first = app._record_live_ticks(
+        [{"symbol": "XAUUSD", "bid": 100.1, "ask": 100.2, "mid": 100.15, "spread_points": 10, "tick_time": 123}]
+    )
+    second = app._record_live_ticks(
+        [{"symbol": "XAUUSD", "bid": 100.1, "ask": 100.2, "mid": 100.15, "spread_points": 10, "tick_time": 123}]
+    )
+    third = app._record_live_ticks(
+        [{"symbol": "XAUUSD", "bid": 100.3, "ask": 100.4, "mid": 100.35, "spread_points": 10, "tick_time": 124}]
+    )
+
+    assert len(first) == 1
+    assert len(second) == 1
+    assert len(third) == 2
+    payload = app._api("/api/tick-tape", "limit=1")
+
+    assert payload["ticks"][0]["tick_time"] == 124
+    assert payload["collector"]["running"] is False
+    assert payload["summary"]["count"] == 1
+    assert payload["summary"]["latest_bid"] == 100.3
+    assert "ticks_per_minute" in payload["summary"]
+    assert "Tick Tape" in app._tick_tape_chart(third)
+
+
+def test_web_bridge_tick_ingest_records_external_on_tick_event(tmp_path):
+    configs = tmp_path / "configs"
+    configs.mkdir()
+    (configs / "paper-demo.json").write_text(json.dumps({"symbols": ["XAUUSD"]}), encoding="utf-8")
+    app = WebApp(tmp_path)
+
+    result = app._ingest_bridge_tick(
+        json.dumps({"symbol": "XAUUSD", "bid": 100.1, "ask": 100.2, "point": 0.01, "digits": 2, "tick_time": 1780650000})
+    )
+    tape = app._api("/api/tick-tape", "limit=1")
+
+    assert result["status"] == "accepted"
+    assert result["received"] == 1
+    assert tape["ticks"][0]["symbol"] == "XAUUSD"
+    assert tape["ticks"][0]["spread_points"] == 10.0
+    assert tape["ticks"][0]["tick_time_display"] == "05 Jun 2026 16:00:00 WIB"
+    assert tape["ticks"][0]["source"] == "ea_socket"
+    assert tape["summary"]["latest_source_label"] == "EA socket"
+
+
+def test_web_ea_socket_tick_suppresses_python_polling_collector(tmp_path):
+    configs = tmp_path / "configs"
+    configs.mkdir()
+    (configs / "mt5-paper.json").write_text(
+        json.dumps({"symbols": ["XAUUSD"], "market_source": "mt5", "mode": "paper"}),
+        encoding="utf-8",
+    )
+    app = WebApp(tmp_path)
+    calls = {"count": 0}
+
+    def fake_read_live_market():
+        calls["count"] += 1
+        return {
+            "status": "connected",
+            "ticks": [
+                {
+                    "symbol": "XAUUSD",
+                    "bid": 101,
+                    "ask": 101.2,
+                    "mid": 101.1,
+                    "spread_points": 10,
+                    "tick_time": calls["count"],
+                }
+            ],
+        }
+
+    app._read_live_market = fake_read_live_market
+    app._ingest_bridge_tick(
+        json.dumps({"symbol": "XAUUSD", "bid": 100.1, "ask": 100.2, "point": 0.01, "digits": 2, "tick_time": 1780650000})
+    )
+    app.start_tick_collector(interval_seconds=0.01)
+    time.sleep(0.05)
+    app.stop_tick_collector()
+
+    payload = app._api("/api/tick-tape", "limit=1")
+
+    assert calls["count"] == 0
+    assert payload["collector"]["polling_suppressed_by_ea"] is True
+    assert payload["collector"]["active_source_label"] == "EA socket"
+    assert payload["ticks"][0]["source"] == "ea_socket"
+
+
+def test_web_background_tick_collector_records_without_browser_poll(tmp_path):
+    configs = tmp_path / "configs"
+    configs.mkdir()
+    (configs / "mt5-paper.json").write_text(
+        json.dumps({"symbols": ["XAUUSD"], "market_source": "mt5", "mode": "paper"}),
+        encoding="utf-8",
+    )
+    app = WebApp(tmp_path)
+    calls = {"count": 0}
+
+    def fake_read_live_market():
+        calls["count"] += 1
+        return {
+            "status": "connected",
+            "ticks": [
+                {
+                    "symbol": "XAUUSD",
+                    "bid": 100 + calls["count"],
+                    "ask": 100.2 + calls["count"],
+                    "mid": 100.1 + calls["count"],
+                    "spread_points": 10,
+                    "tick_time": calls["count"],
+                }
+            ],
+        }
+
+    app._read_live_market = fake_read_live_market
+    app.start_tick_collector(interval_seconds=0.01)
+    time.sleep(0.05)
+    app.stop_tick_collector()
+
+    ticks = app._api("/api/tick-tape")["ticks"]
+
+    assert len(ticks) >= 1
+    assert ticks[0]["symbol"] == "XAUUSD"
+
+
+def test_web_market_chart_uses_mt5_ohlc_when_available(tmp_path, monkeypatch):
+    configs = tmp_path / "configs"
+    configs.mkdir()
+    (configs / "paper-demo.json").write_text(
+        json.dumps({"symbols": ["EURUSD"], "market_source": "sim"}),
+        encoding="utf-8",
+    )
+    (configs / "mt5-paper.json").write_text(
+        json.dumps(
+            {
+                "symbols": ["XAUUSD"],
+                "market_source": "mt5",
+                "mode": "paper",
+                "memory_path": "data/mt5-paper-experience.jsonl",
+                "paper_state_path": "data/mt5-paper-state.json",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class Info:
+        visible = True
+        digits = 3
+
+    class FakeMt5:
+        TIMEFRAME_H1 = 1
+        TIMEFRAME_M15 = 2
+
+        def symbol_info(self, symbol):
+            return Info()
+
+        def symbol_info_tick(self, symbol):
+            return type("Tick", (), {"bid": 101.7, "ask": 101.9, "time": 1780657200})()
+
+        def symbol_select(self, symbol, visible):
+            return True
+
+        def copy_rates_from_pos(self, symbol, timeframe, start, count):
+            return [
+                {"time": 1780650000, "open": 100.1111, "high": 101.2222, "low": 99.3333, "close": 100.4444, "tick_volume": 7},
+                {"time": 1780653600, "open": 100.4444, "high": 102.5555, "low": 100.1111, "close": 101.7777, "tick_volume": 9},
+            ]
+
+    class FakeConnection:
+        def __init__(self):
+            self.mt5 = FakeMt5()
+
+        def initialize(self):
+            return None
+
+    monkeypatch.setattr("quantz.web.Mt5Connection", FakeConnection)
+
+    payload = WebApp(tmp_path)._api("/api/market-chart")
+
+    assert payload["source"] == "mt5_ohlc_history"
+    assert payload["timeframe"] == "H1"
+    assert payload["symbols"] == ["XAUUSD"]
+    assert payload["series"]["XAUUSD"][0]["open"] == 100.111
+    assert payload["series"]["XAUUSD"][1]["tick_volume"] == 9
+    assert payload["overlays"]["XAUUSD"]["current_tick"]["bid"] == 101.7
+
+    m15_payload = WebApp(tmp_path)._api("/api/market-chart", "timeframe=M15&candles=20")
+
+    assert m15_payload["timeframe"] == "M15"
 
 
 def monitor_with_events(settings, iterations, quiet=False, stop_event=None, event_sink=None):

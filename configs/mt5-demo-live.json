@@ -1,0 +1,21 @@
+{
+  "analyst": "rule",
+  "bridge_url": "http://127.0.0.1:8765",
+  "default_risk_percent": 0.25,
+  "disabled_symbols": [],
+  "execution_source": "mt5",
+  "interval_seconds": 60,
+  "market_source": "mt5",
+  "memory_path": "data/mt5-demo-live-experience.jsonl",
+  "min_closed_trades_before_demo": 20,
+  "min_confidence": 0.65,
+  "mode": "live",
+  "paper_start_equity": 10000,
+  "paper_state_path": "data/mt5-demo-live-paper-state.json",
+  "position_cooldown": "none",
+  "reward_risk_ratio": 1.7,
+  "sim_state_path": "data/mt5-demo-live-sim-market-state.json",
+  "symbols": [
+    "XAUUSD"
+  ]
+}

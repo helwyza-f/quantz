@@ -3,6 +3,8 @@ from __future__ import annotations
 import html
 import json
 import threading
+from collections import deque
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -11,6 +13,9 @@ from urllib.parse import parse_qs, urlparse
 from quantz.config import load_settings, merge_settings, settings_to_dict
 from quantz.dashboard import DashboardRenderer
 from quantz.experiment import ExperimentRunner
+from quantz.market import Mt5AccountFeed, Mt5Connection, Mt5MarketFeed
+
+LOCAL_TZ = timezone(timedelta(hours=7), "WIB")
 
 
 class WebApp:
@@ -19,6 +24,15 @@ class WebApp:
         self.configs_dir = self.root / "configs"
         self.experiments_dir = self.root / "data" / "experiments"
         self.monitor_session_path = self.root / "data" / "monitor-session.json"
+        self.tick_tape_path = self.root / "data" / "mt5-ticks.jsonl"
+        self.tick_tape_lock = threading.Lock()
+        self.tick_recent_keys: set[tuple[str, str, str, str]] = set()
+        self.last_ea_tick_at: datetime | None = None
+        self.last_python_poll_at: datetime | None = None
+        self.event_condition = threading.Condition()
+        self.event_sequence = 0
+        self.tick_collector_thread: threading.Thread | None = None
+        self.tick_collector_stop_event: threading.Event | None = None
         self.monitor_fn = monitor_fn
         self.monitor_lock = threading.Lock()
         self.monitor_thread: threading.Thread | None = None
@@ -68,18 +82,30 @@ class WebApp:
         if parsed.path == "/operations":
             self._html(request, self._operations_page())
             return
+        if parsed.path == "/agent":
+            self._html(request, self._agent_page())
+            return
+        if parsed.path == "/control":
+            self._html(request, self._control_page())
+            return
         if parsed.path == "/pnl":
             self._html(request, self._pnl_page())
             return
         if parsed.path == "/market":
             self._html(request, self._market_page())
             return
+        if parsed.path == "/events":
+            self._events(request)
+            return
+        if parsed.path == "/bridge/tick":
+            self._json(request, self._ingest_bridge_tick_query(parsed.query))
+            return
         if parsed.path.startswith("/experiments/") and parsed.path.endswith("/dashboard.html"):
             experiment_name = parsed.path.split("/")[2]
             self._file(request, self.experiments_dir / experiment_name / "dashboard.html", "text/html")
             return
         if parsed.path.startswith("/api/"):
-            self._json(request, self._api(parsed.path))
+            self._json(request, self._api(parsed.path, parsed.query))
             return
         self._not_found(request)
 
@@ -87,6 +113,9 @@ class WebApp:
         parsed = urlparse(request.path)
         length = int(request.headers.get("Content-Length", "0"))
         body = request.rfile.read(length).decode("utf-8")
+        if parsed.path == "/bridge/tick":
+            self._json(request, self._ingest_bridge_tick(body))
+            return
         form = parse_qs(body)
         if parsed.path == "/config/save":
             name = form.get("name", ["paper-demo.json"])[0]
@@ -111,6 +140,17 @@ class WebApp:
         if parsed.path == "/monitor/stop":
             self._stop_monitor()
             self._redirect(request, "/operations")
+            return
+        if parsed.path == "/agent/monitor/start":
+            result = self._start_monitor_from_form(form)
+            if "error" in result:
+                self._html(request, self._layout("Agent Error", f"<section><h2>Error</h2><pre>{self._escape(result['error'])}</pre><a class=\"button secondary\" href=\"/agent\">Back</a></section>"))
+                return
+            self._redirect(request, "/agent")
+            return
+        if parsed.path == "/agent/monitor/stop":
+            self._stop_monitor()
+            self._redirect(request, "/agent")
             return
         self._not_found(request)
 
@@ -198,6 +238,11 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
             total_r = float(report.get("total_r_multiple", 0.0))
             estimated_pnl = self._estimated_pnl(total_r, config)
             dashboard = self.experiments_dir / name / "dashboard.html"
+            dashboard_link = (
+                f'<a href="/experiments/{self._escape(name)}/dashboard.html">Open</a>'
+                if dashboard.exists()
+                else "Not rendered"
+            )
             rows.append(
                 "<tr>"
                 f"<td>{self._escape(name)}</td>"
@@ -207,7 +252,7 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
                 f"<td>{self._escape(self._money(estimated_pnl))}</td>"
                 f"<td>{self._escape(report.get('win_rate', 0))}</td>"
                 f"<td>{self._escape(report.get('open_position_count', 0))}</td>"
-                f"<td>{'<a href=\"/experiments/' + self._escape(name) + '/dashboard.html\">Open</a>' if dashboard.exists() else 'Not rendered'}</td>"
+                f"<td>{dashboard_link}</td>"
                 "</tr>"
             )
         table = "<p>No experiments yet.</p>" if not rows else "<table><thead><tr><th>Run</th><th>Verdict</th><th>Status</th><th>Total R</th><th>Est. PnL</th><th>Win Rate</th><th>Open</th><th>Dashboard</th></tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
@@ -291,22 +336,28 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
 
     def _market_page(self) -> str:
         chart = self._market_chart_summary()
+        live = self._live_market_summary()
         selected = chart["symbols"][0] if chart["symbols"] else ""
         return self._layout(
-            "Market Chart",
+            "Market",
             f"""
             <section>
-              <h2>Chart Controls</h2>
-              <label>Symbol<select id="market-symbol-select">{self._market_symbol_options(chart["symbols"], selected)}</select></label>
-              <div class="metrics">
-                <div class="metric"><span>Source</span><strong>{self._escape(chart["source"])}</strong></div>
-                <div class="metric"><span>Symbols</span><strong>{self._escape(", ".join(chart["symbols"]))}</strong></div>
-                <div class="metric"><span>Selected</span><strong id="market-selected-symbol">{self._escape(selected)}</strong></div>
-                <div class="metric"><span>Candles</span><strong id="market-candle-count">{self._escape(len(chart["series"].get(selected, [])))}</strong></div>
+              <h2>Market</h2>
+              <div id="market-live-strip" class="market-strip">{self._market_live_strip(live)}</div>
+              <div class="market-toolbar">
+                <label>Symbol<select id="market-symbol-select">{self._market_symbol_options(chart["symbols"], selected)}</select></label>
+                <label>Timeframe<select id="market-timeframe-select">{self._market_timeframe_options(chart.get("timeframe", "H1"))}</select></label>
+                <label>Candles<input id="market-candle-limit" type="number" min="20" max="300" step="10" value="{self._escape(len(chart["series"].get(selected, [])) or 80)}"></label>
+                <button id="market-zoom-in" type="button">Zoom In</button>
+                <button id="market-zoom-out" class="secondary" type="button">Zoom Out</button>
+                <button id="market-reset-view" class="secondary" type="button">Reset</button>
               </div>
-            </section>
-            <section>
-              <h2>Candlestick</h2>
+              <div class="market-meta">
+                <span>Source <strong>{self._escape(chart["source"])}</strong></span>
+                <span>Timeframe <strong id="market-timeframe-label">{self._escape(chart.get("timeframe", ""))}</strong></span>
+                <span>Selected <strong id="market-selected-symbol">{self._escape(selected)}</strong></span>
+                <span>Candles <strong id="market-candle-count">{self._escape(len(chart["series"].get(selected, [])))}</strong></span>
+              </div>
               <div class="market-legend">
                 <span><i class="legend-up"></i>Bull candle</span>
                 <span><i class="legend-down"></i>Bear candle</span>
@@ -317,10 +368,123 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
               </div>
               <div id="market-candles">{self._candlestick_chart(selected, chart["series"].get(selected, []), chart["overlays"].get(selected, {}))}</div>
             </section>
+            <section>
+              <h2>Tick Tape</h2>
+              <div class="market-toolbar compact">
+                <label>Window<select id="tick-tape-limit"><option value="50">50 ticks</option><option value="120" selected>120 ticks</option><option value="300">300 ticks</option></select></label>
+              </div>
+              <div id="tick-tape-metrics" class="market-strip">{self._tick_tape_metrics(live.get("recent_ticks", []))}</div>
+              <div id="tick-tape-chart">{self._tick_tape_chart(live.get("recent_ticks", []))}</div>
+            </section>
             """,
         )
 
-    def _api(self, path: str) -> dict[str, Any]:
+    def _control_page(self) -> str:
+        summary = self._control_summary(include_chart=True)
+        chart = summary.get("chart", {})
+        selected = chart.get("symbols", [""])[0] if chart.get("symbols") else ""
+        agent = summary.get("agent", {})
+        operations = summary.get("operations", {})
+        return self._layout(
+            "Control",
+            f"""
+            <div id="control-root">
+              <section class="control-shell">
+                <div class="control-main">
+                  <div class="control-header">
+                    <div>
+                      <h2>Market Control</h2>
+                      <p>Live MT5 tick, current price level, and candle context in one surface.</p>
+                    </div>
+                    <strong id="control-stream-state" class="control-pill">connecting</strong>
+                  </div>
+                  <div id="control-live-strip" class="market-strip compact-strip">{self._control_live_strip(summary)}</div>
+                  <div class="market-toolbar control-toolbar">
+                    <label>Symbol<select id="control-symbol-select">{self._market_symbol_options(chart.get("symbols", []), selected)}</select></label>
+                    <label>Timeframe<select id="control-timeframe-select">{self._market_timeframe_options(chart.get("timeframe", "H1"))}</select></label>
+                    <label>Candles<input id="control-candle-limit" type="number" min="20" max="300" step="10" value="{self._escape(len(chart.get("series", {}).get(selected, [])) or 80)}"></label>
+                    <button id="control-zoom-in" type="button">Zoom In</button>
+                    <button id="control-zoom-out" class="secondary" type="button">Zoom Out</button>
+                    <button id="control-reset-view" class="secondary" type="button">Reset</button>
+                  </div>
+                  <div class="market-meta">
+                    <span>Source <strong id="control-chart-source">{self._escape(chart.get("source", ""))}</strong></span>
+                    <span>Timeframe <strong id="control-timeframe-label">{self._escape(chart.get("timeframe", ""))}</strong></span>
+                    <span>Selected <strong id="control-selected-symbol">{self._escape(selected)}</strong></span>
+                    <span>Candles <strong id="control-candle-count">{self._escape(len(chart.get("series", {}).get(selected, [])))}</strong></span>
+                  </div>
+                  <div id="control-market-candles">{self._candlestick_chart(selected, chart.get("series", {}).get(selected, []), chart.get("overlays", {}).get(selected, {}))}</div>
+                </div>
+                <aside class="control-side">
+                  <div class="control-panel">
+                    <h2>Tick</h2>
+                    <div id="control-tick-status" class="control-status-list">{self._control_tick_status(summary)}</div>
+                    <div id="control-tick-chart">{self._tick_tape_chart(summary.get("ticks", []))}</div>
+                  </div>
+                  <div class="control-panel">
+                    <h2>Agent</h2>
+                    <div id="control-agent-strip" class="market-strip compact-strip">{self._agent_status_strip(agent)}</div>
+                    <div id="control-agent-controls">{self._agent_controls(agent.get("monitor", {}))}</div>
+                  </div>
+                  <div class="control-panel">
+                    <h2>Reasoning</h2>
+                    <div id="control-decision-card">{self._agent_decision_card(agent.get("latest_decision", {}))}</div>
+                  </div>
+                </aside>
+              </section>
+              <section class="control-lower">
+                <div class="control-panel">
+                  <h2>Open Positions</h2>
+                  <div id="control-open-positions">{self._positions_table(agent.get("open_positions", []))}</div>
+                </div>
+                <div class="control-panel">
+                  <h2>History</h2>
+                  <div id="control-history">{self._decisions_table(agent.get("recent_decisions", []))}</div>
+                </div>
+                <div class="control-panel">
+                  <h2>Closed</h2>
+                  <div id="control-recent-closes">{self._closes_table(operations.get("recent_closes", []))}</div>
+                </div>
+                <div class="control-panel">
+                  <h2>Agent Events</h2>
+                  <div id="control-agent-events">{self._monitor_events_table(agent.get("monitor", {}).get("recent_events", []))}</div>
+                </div>
+              </section>
+            </div>
+            """,
+        )
+
+    def _agent_page(self) -> str:
+        console = self._agent_console_summary()
+        monitor = console["monitor"]
+        return self._layout(
+            "Agent",
+            f"""
+            <section>
+              <h2>Agent Control</h2>
+              <div id="agent-status-strip" class="market-strip">{self._agent_status_strip(console)}</div>
+              <div id="agent-controls">{self._agent_controls(monitor)}</div>
+            </section>
+            <section>
+              <h2>Decision Console</h2>
+              <div id="agent-decision-card">{self._agent_decision_card(console["latest_decision"])}</div>
+            </section>
+            <section>
+              <h2>Recent Decisions</h2>
+              <div id="agent-decisions-table">{self._decisions_table(console["recent_decisions"])}</div>
+            </section>
+            <section>
+              <h2>Open Positions</h2>
+              <div id="agent-open-positions">{self._positions_table(console["open_positions"])}</div>
+            </section>
+            <section>
+              <h2>Agent Events</h2>
+              <div id="agent-events-table">{self._monitor_events_table(monitor["recent_events"])}</div>
+            </section>
+            """,
+        )
+
+    def _api(self, path: str, query: str = "") -> dict[str, Any]:
         if path == "/api/configs":
             return {"configs": self._config_names()}
         if path == "/api/experiments":
@@ -329,6 +493,10 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
             return self._performance_summary()
         if path == "/api/operations":
             return self._operations_summary()
+        if path == "/api/agent-console":
+            return self._agent_console_summary()
+        if path == "/api/control":
+            return self._control_summary(include_chart=True)
         if path == "/api/pnl":
             return self._pnl_summary()
         if path == "/api/monitor":
@@ -336,7 +504,25 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
         if path == "/api/visual-digest":
             return self._visual_digest()
         if path == "/api/market-chart":
-            return self._market_chart_summary()
+            params = parse_qs(query)
+            try:
+                candle_count = int(params.get("candles", ["80"])[0])
+            except ValueError:
+                candle_count = 80
+            return self._market_chart_summary(
+                timeframe=params.get("timeframe", ["H1"])[0],
+                candle_count=candle_count,
+            )
+        if path == "/api/live-market":
+            return self._live_market_summary()
+        if path == "/api/tick-tape":
+            params = parse_qs(query)
+            try:
+                limit = int(params.get("limit", ["120"])[0])
+            except ValueError:
+                limit = 120
+            ticks = self._recent_ticks(limit=max(1, min(limit, 500)))
+            return {"collector": self._tick_collector_summary(), "summary": self._tick_tape_summary(ticks), "ticks": ticks}
         return {"error": "not_found"}
 
     def _layout(self, title: str, body: str) -> str:
@@ -352,7 +538,7 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
     body {{ margin:0; background:var(--bg); color:var(--ink); font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }}
     nav {{ height:56px; display:flex; align-items:center; justify-content:space-between; padding:0 24px; background:var(--panel); border-bottom:1px solid var(--line); }}
     nav a {{ color:var(--ink); text-decoration:none; margin-left:14px; font-weight:650; }}
-    main {{ max-width:1120px; margin:0 auto; padding:24px; }}
+    main {{ max-width:1500px; margin:0 auto; padding:24px; }}
     h1 {{ font-size:26px; margin:0 0 18px; }}
     h2 {{ font-size:17px; margin:0 0 12px; }}
     p {{ color:var(--muted); margin:0 0 12px; }}
@@ -396,6 +582,22 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
     .market-ma-fast {{ fill:none; stroke:#f2c94c; stroke-width:2.2; }}
     .market-ma-slow {{ fill:none; stroke:#56ccf2; stroke-width:2.2; }}
     .market-atr {{ fill:rgba(86,204,242,0.10); stroke:#335f72; stroke-width:1; }}
+    .market-strip {{ display:grid; grid-template-columns:repeat(7,minmax(0,1fr)); gap:1px; border:1px solid var(--line); border-radius:8px; overflow:hidden; margin-bottom:12px; background:var(--line); }}
+    .market-strip span {{ display:block; min-width:0; background:#fff; padding:9px 10px; }}
+    .market-strip small {{ display:block; color:var(--muted); font-size:11px; font-weight:700; }}
+    .market-strip strong {{ display:block; margin-top:2px; font-size:14px; overflow-wrap:anywhere; }}
+    .market-toolbar {{ display:grid; grid-template-columns:2fr 1.2fr 0.8fr auto auto auto; gap:8px; align-items:end; margin-bottom:10px; }}
+    .market-toolbar.compact {{ grid-template-columns:180px; margin-bottom:10px; }}
+    .market-toolbar button {{ height:40px; margin-top:0; white-space:nowrap; }}
+    .market-toolbar input,.market-toolbar select {{ margin-top:4px; }}
+    .market-meta {{ display:flex; gap:12px; flex-wrap:wrap; color:var(--muted); font-size:12px; margin:0 0 10px; }}
+    .market-meta strong {{ color:var(--ink); margin-left:4px; }}
+    .decision-card {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; }}
+    .decision-card > div {{ border:1px solid var(--line); border-radius:8px; padding:12px; min-width:0; }}
+    .decision-card span {{ display:block; color:var(--muted); font-size:12px; font-weight:700; }}
+    .decision-card strong {{ display:block; margin-top:4px; font-size:15px; overflow-wrap:anywhere; }}
+    .decision-reasons {{ grid-column:1 / -1; }}
+    .decision-reasons ul {{ margin:8px 0 0; padding-left:18px; }}
     .market-legend {{ display:flex; flex-wrap:wrap; gap:14px; align-items:center; margin:0 0 10px; color:var(--muted); font-size:12px; }}
     .market-legend span {{ display:inline-flex; align-items:center; gap:6px; }}
     .market-legend i {{ width:18px; height:3px; display:inline-block; border-radius:3px; background:#9aa8ba; }}
@@ -405,12 +607,34 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
     .legend-ma-slow {{ background:#56ccf2 !important; }}
     .legend-atr {{ background:#335f72 !important; }}
     .legend-entry {{ background:#6b8cff !important; }}
-    @media (max-width:760px) {{ main {{ padding:16px; }} .metrics,.form-grid {{ grid-template-columns:1fr; }} nav {{ padding:0 16px; }} }}
+    .control-shell {{ display:grid; grid-template-columns:minmax(0,1.65fr) 390px; gap:14px; align-items:start; }}
+    .control-main,.control-panel {{ border:1px solid var(--line); border-radius:8px; background:#fff; padding:14px; min-width:0; }}
+    .control-header {{ display:flex; justify-content:space-between; gap:12px; align-items:start; margin-bottom:10px; }}
+    .control-header p {{ margin:2px 0 0; }}
+    .control-pill {{ display:inline-flex; align-items:center; min-height:28px; padding:5px 9px; border-radius:999px; background:#edf2f5; color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:0; }}
+    .control-pill.live {{ background:#d9e8e2; color:var(--accent); }}
+    .control-pill.error {{ background:#f3dada; color:var(--bad); }}
+    .control-side {{ display:grid; gap:14px; }}
+    .control-lower {{ display:grid; grid-template-columns:1fr 1fr; gap:14px; background:transparent; border:0; padding:0; }}
+    .control-lower .control-panel {{ overflow-x:auto; }}
+    .control-toolbar {{ grid-template-columns:2fr 1.1fr 0.75fr auto auto auto; }}
+    .compact-strip {{ grid-template-columns:repeat(4,minmax(0,1fr)); }}
+    .control-status-list {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; margin-bottom:10px; }}
+    .control-status-list div {{ border:1px solid var(--line); border-radius:7px; padding:9px 10px; min-width:0; }}
+    .control-status-list span {{ display:block; color:var(--muted); font-size:11px; font-weight:700; }}
+    .control-status-list strong {{ display:block; margin-top:2px; font-size:14px; overflow-wrap:anywhere; }}
+    #control-market-candles,#control-tick-chart {{ background:#0f1720; border:1px solid #263241; border-radius:8px; padding:10px; overflow-x:auto; }}
+    #control-market-candles svg {{ display:block; width:100%; min-width:820px; }}
+    #control-tick-chart svg {{ display:block; width:100%; min-width:360px; }}
+    #control-decision-card .decision-card {{ grid-template-columns:1fr 1fr; }}
+    #control-agent-controls .market-toolbar {{ grid-template-columns:1fr 0.8fr 0.8fr auto; }}
+    @media (max-width:760px) {{ main {{ padding:16px; }} .metrics,.form-grid,.market-toolbar,.market-strip,.decision-card,.control-shell,.control-lower,.control-status-list {{ grid-template-columns:1fr; }} nav {{ padding:0 16px; }} nav div {{ overflow-x:auto; white-space:nowrap; }} }}
+    @media (max-width:980px) {{ .market-toolbar,.control-toolbar {{ grid-template-columns:1fr 1fr; }} .market-strip,.compact-strip {{ grid-template-columns:repeat(2,minmax(0,1fr)); }} .control-shell,.control-lower {{ grid-template-columns:1fr; }} }}
     @media (max-width:980px) {{ .chart-grid {{ grid-template-columns:1fr; }} }}
   </style>
 </head>
 <body>
-<nav><strong>Quantz</strong><div><a href="/">Overview</a><a href="/operations">Operations</a><a href="/pnl">PnL</a><a href="/market">Market</a><a href="/experiments">Experiments</a></div></nav>
+<nav><strong>Quantz</strong><div><a href="/control">Control</a><a href="/">Overview</a><a href="/agent">Agent</a><a href="/operations">Operations</a><a href="/pnl">PnL</a><a href="/market">Market</a><a href="/experiments">Experiments</a></div></nav>
 <main><h1>{self._escape(title)}</h1>{body}</main>
 {self._live_refresh_script()}
 </body>
@@ -483,8 +707,8 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
         paper_state_path = self._rooted_path(getattr(settings, "paper_state_path", "data/paper-state.json"))
         memory_path = self._rooted_path(getattr(settings, "memory_path", "data/experience.jsonl"))
         paper_state = self._read_json(paper_state_path)
-        open_positions = list(paper_state.get("open_positions", []))
-        closed_positions = list(paper_state.get("closed_positions", []))
+        open_positions = [self._position_row(position) for position in paper_state.get("open_positions", [])]
+        closed_positions = [self._close_row(position) for position in paper_state.get("closed_positions", [])]
         experiences = self._read_jsonl(memory_path)
         recent_decisions = [self._decision_row(row) for row in experiences[-12:]][::-1]
         total_r = sum(float(position.get("r_multiple", 0.0) or 0.0) for position in closed_positions)
@@ -506,6 +730,71 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
             "recent_closes": closed_positions[-10:][::-1],
             "recent_decisions": recent_decisions,
         }
+
+    def _agent_console_summary(self) -> dict[str, Any]:
+        config_name, settings = self._agent_settings()
+        paper_state_path = self._rooted_path(getattr(settings, "paper_state_path", "data/paper-state.json"))
+        memory_path = self._rooted_path(getattr(settings, "memory_path", "data/experience.jsonl"))
+        paper_state = self._read_json(paper_state_path)
+        experiences = self._read_jsonl(memory_path)
+        decisions = [self._decision_row(row) for row in experiences[-20:]][::-1]
+        latest = decisions[0] if decisions else {}
+        open_positions = [self._position_row(position) for position in paper_state.get("open_positions", [])]
+        closed_positions = [self._close_row(position) for position in paper_state.get("closed_positions", [])]
+        total_r = sum(float(position.get("r_multiple", 0.0) or 0.0) for position in closed_positions)
+        wins = sum(1 for position in closed_positions if float(position.get("r_multiple", 0.0) or 0.0) > 0)
+        losses = sum(1 for position in closed_positions if float(position.get("r_multiple", 0.0) or 0.0) < 0)
+        monitor = self._monitor_summary()
+        return {
+            "config": config_name,
+            "mode": getattr(settings, "mode", "paper"),
+            "market_source": getattr(settings, "market_source", "demo"),
+            "symbols": getattr(settings, "symbols", []),
+            "memory_path": str(memory_path.relative_to(self.root) if memory_path.is_relative_to(self.root) else memory_path),
+            "paper_state_path": str(paper_state_path.relative_to(self.root) if paper_state_path.is_relative_to(self.root) else paper_state_path),
+            "experience_count": len(experiences),
+            "latest_decision": latest,
+            "recent_decisions": decisions,
+            "open_positions": open_positions,
+            "open_position_count": len(open_positions),
+            "recent_closes": closed_positions[-10:][::-1],
+            "closed_position_count": len(closed_positions),
+            "paper_total_r": round(total_r, 4),
+            "win_rate": round(wins / (wins + losses), 4) if wins + losses else 0.0,
+            "monitor": monitor,
+        }
+
+    def _control_summary(self, include_chart: bool = False) -> dict[str, Any]:
+        ticks = self._recent_ticks(limit=120)
+        live_summary = self._tick_tape_summary(ticks)
+        agent = self._agent_console_summary()
+        payload = {
+            "generated_at": self._now(),
+            "generated_at_display": self._format_local_time(self._now()),
+            "sequence": self.event_sequence,
+            "stream": {
+                "transport": "sse",
+                "event_source": "/events",
+                "browser_polling": False,
+            },
+            "live": {
+                "collector": self._tick_collector_summary(),
+                "summary": live_summary,
+                "latest_tick": ticks[0] if ticks else {},
+            },
+            "ticks": ticks,
+            "agent": agent,
+            "operations": {
+                "open_position_count": agent.get("open_position_count", 0),
+                "closed_position_count": agent.get("closed_position_count", 0),
+                "paper_total_r": agent.get("paper_total_r", 0),
+                "win_rate": agent.get("win_rate", 0),
+                "recent_closes": agent.get("recent_closes", []),
+            },
+        }
+        if include_chart:
+            payload["chart"] = self._market_chart_summary()
+        return payload
 
     def _pnl_summary(self) -> dict[str, Any]:
         settings = self._default_settings()
@@ -530,7 +819,8 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
                 {
                     "index": index,
                     "symbol": position.get("symbol", ""),
-                    "closed_at": position.get("closed_at", ""),
+                    "closed_at": self._format_local_time(position.get("closed_at", "")),
+                    "closed_at_raw": position.get("closed_at", ""),
                     "r_multiple": round(r_multiple, 4),
                     "cumulative_r": round(cumulative_r, 4),
                     "estimated_pnl": round(cumulative_r * risk_amount, 2),
@@ -649,7 +939,18 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
             notes.append("continue_collecting_paper_evidence")
         return notes
 
-    def _market_chart_summary(self) -> dict[str, Any]:
+    def _market_chart_summary(self, timeframe: str = "H1", candle_count: int = 80) -> dict[str, Any]:
+        safe_timeframe = self._safe_timeframe(timeframe)
+        safe_candle_count = max(20, min(int(candle_count or 80), 300))
+        live_config_name, live_settings = self._live_market_settings()
+        if getattr(live_settings, "market_source", "demo") == "mt5":
+            try:
+                mt5_summary = self._mt5_market_chart_summary(live_config_name, live_settings, safe_timeframe, safe_candle_count)
+                if mt5_summary.get("status") == "connected":
+                    return mt5_summary
+            except Exception:
+                pass
+
         settings = self._default_settings()
         state_path = self._rooted_path(getattr(settings, "sim_state_path", "data/sim-market-state.json"))
         paper_state_path = self._rooted_path(getattr(settings, "paper_state_path", "data/paper-state.json"))
@@ -681,11 +982,599 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
             }
         return {
             "source": "simulated_ohlc_history",
+            "timeframe": "sim",
             "state_path": str(state_path.relative_to(self.root) if state_path.is_relative_to(self.root) else state_path),
             "symbols": list(getattr(settings, "symbols", [])),
             "series": series,
             "overlays": overlays,
         }
+
+    def _mt5_market_chart_summary(self, config_name: str, settings: Any, timeframe_label: str, candle_count: int) -> dict[str, Any]:
+        from datetime import datetime, timezone
+
+        connection = Mt5Connection()
+        connection.initialize()
+        mt5 = connection.mt5
+        timeframe = self._mt5_timeframe(mt5, timeframe_label)
+        paper_state_path = self._rooted_path(getattr(settings, "paper_state_path", "data/paper-state.json"))
+        paper_state = self._read_json(paper_state_path)
+        experiences = self._read_jsonl(self._rooted_path(getattr(settings, "memory_path", "data/experience.jsonl")))
+        series: dict[str, list[dict[str, Any]]] = {}
+        overlays: dict[str, dict[str, list[dict[str, Any]]]] = {}
+
+        for symbol in getattr(settings, "symbols", []):
+            info = mt5.symbol_info(symbol)
+            if info is None:
+                raise RuntimeError(f"mt5_symbol_not_found:{symbol}")
+            if not getattr(info, "visible", True) and not mt5.symbol_select(symbol, True):
+                raise RuntimeError(f"mt5_symbol_select_failed:{symbol}")
+
+            tick = mt5.symbol_info_tick(symbol)
+            point = float(getattr(info, "point", 0.0) or 0.0)
+            rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, candle_count)
+            history = []
+            digits = int(getattr(info, "digits", 5) or 5)
+            if rates is not None:
+                for index, rate in enumerate(list(rates), start=1):
+                    timestamp = datetime.fromtimestamp(int(rate["time"]), timezone.utc).isoformat()
+                    try:
+                        tick_volume = int(rate["tick_volume"])
+                    except (KeyError, TypeError, ValueError):
+                        tick_volume = 0
+                    history.append(
+                        {
+                            "time": timestamp,
+                            "step": index,
+                            "open": round(float(rate["open"]), digits),
+                            "high": round(float(rate["high"]), digits),
+                            "low": round(float(rate["low"]), digits),
+                            "close": round(float(rate["close"]), digits),
+                            "tick_volume": tick_volume,
+                        }
+                    )
+            series[symbol] = history[-candle_count:]
+            current_tick = {}
+            if tick is not None:
+                bid = float(getattr(tick, "bid", 0.0) or 0.0)
+                ask = float(getattr(tick, "ask", 0.0) or 0.0)
+                spread_points = round((ask - bid) / point, 2) if point > 0 else 0.0
+                current_tick = {
+                    "bid": round(bid, digits),
+                    "ask": round(ask, digits),
+                    "mid": round((bid + ask) / 2, digits),
+                    "spread_points": spread_points,
+                    "time": int(getattr(tick, "time", 0) or 0),
+                }
+            overlays[symbol] = {
+                "indicators": self._market_indicators(history[-candle_count:]),
+                "current_tick": current_tick,
+                "signals": self._market_signals(experiences, symbol),
+                "open_positions": [
+                    position
+                    for position in paper_state.get("open_positions", [])
+                    if position.get("symbol") == symbol
+                ],
+                "closed_positions": [
+                    position
+                    for position in paper_state.get("closed_positions", [])[-80:]
+                    if position.get("symbol") == symbol
+                ],
+            }
+
+        return {
+            "source": "mt5_ohlc_history",
+            "status": "connected",
+            "config": config_name,
+            "timeframe": timeframe_label,
+            "candle_count": candle_count,
+            "state_path": "MetaTrader5.copy_rates_from_pos",
+            "symbols": list(getattr(settings, "symbols", [])),
+            "series": series,
+            "overlays": overlays,
+        }
+
+    def _live_market_summary(self) -> dict[str, Any]:
+        try:
+            payload = self._read_live_market()
+            if payload.get("status") == "connected":
+                payload["recent_ticks"] = self._record_live_ticks(payload.get("ticks", []))
+            else:
+                payload["recent_ticks"] = self._recent_ticks()
+            return payload
+        except Exception as exc:
+            config_name, _settings = self._live_market_settings()
+            return {
+                "enabled": True,
+                "status": "error",
+                "config": config_name,
+                "source": "mt5",
+                "updated_at": self._now(),
+                "updated_at_display": self._format_local_time(self._now()),
+                "account": {},
+                "ticks": [],
+                "recent_ticks": self._recent_ticks(),
+                "error": str(exc),
+            }
+
+    def _read_live_market(self) -> dict[str, Any]:
+        config_name, settings = self._live_market_settings()
+        if getattr(settings, "market_source", "demo") != "mt5":
+            return {
+                "enabled": False,
+                "status": "disabled",
+                "config": config_name,
+                "source": getattr(settings, "market_source", "demo"),
+                "updated_at": self._now(),
+                "updated_at_display": self._format_local_time(self._now()),
+                "account": {},
+                "ticks": [],
+                "recent_ticks": self._recent_ticks(),
+                "error": "selected config is not using market_source: mt5",
+            }
+
+        connection = Mt5Connection()
+        market_feed = Mt5MarketFeed(connection)
+        account = Mt5AccountFeed(connection).state()
+        ticks = []
+        for symbol in getattr(settings, "symbols", []):
+            snapshot = market_feed.snapshot(symbol)
+            ticks.append(
+                {
+                    "symbol": snapshot.symbol,
+                    "bid": snapshot.bid,
+                    "ask": snapshot.ask,
+                    "mid": round(snapshot.mid, 6),
+                    "spread_points": snapshot.spread_points,
+                    "atr_points": snapshot.atr_points,
+                    "trend_score": snapshot.trend_score,
+                    "volatility_score": snapshot.volatility_score,
+                    "session": snapshot.session,
+                    "tick_time": snapshot.features.get("last_tick_time", ""),
+                    "tick_time_display": self._format_local_time(snapshot.features.get("last_tick_time", "")),
+                    "rates_loaded": snapshot.features.get("rates_loaded", 0),
+                }
+            )
+        return {
+            "enabled": True,
+            "status": "connected",
+            "config": config_name,
+            "source": "mt5",
+            "updated_at": self._now(),
+            "updated_at_display": self._format_local_time(self._now()),
+            "account": {
+                "balance": account.balance,
+                "equity": account.equity,
+                "free_margin": account.free_margin,
+                "currency": account.currency,
+                "open_positions": account.open_positions,
+            },
+            "ticks": ticks,
+            "recent_ticks": [],
+            "error": None,
+        }
+
+    def start_tick_collector(self, interval_seconds: float = 1.0) -> None:
+        if self.tick_collector_thread and self.tick_collector_thread.is_alive():
+            return
+        stop_event = threading.Event()
+        self.tick_collector_stop_event = stop_event
+        self.tick_collector_thread = threading.Thread(
+            target=self._tick_collector_target,
+            args=(max(0.25, interval_seconds), stop_event),
+            daemon=True,
+            name="quantz-mt5-tick-collector",
+        )
+        self.tick_collector_thread.start()
+
+    def _tick_collector_target(self, interval_seconds: float, stop_event: threading.Event) -> None:
+        while not stop_event.is_set():
+            try:
+                if not self._ea_socket_active():
+                    payload = self._read_live_market()
+                    if payload.get("status") == "connected":
+                        self._record_live_ticks(payload.get("ticks", []), source="python_polling")
+            except Exception:
+                pass
+            if stop_event.wait(interval_seconds):
+                break
+
+    def stop_tick_collector(self) -> None:
+        if self.tick_collector_stop_event is not None:
+            self.tick_collector_stop_event.set()
+        if self.tick_collector_thread is not None:
+            self.tick_collector_thread.join(timeout=2)
+        self.tick_collector_stop_event = None
+        self.tick_collector_thread = None
+
+    def _live_market_metrics(self, live: dict[str, Any]) -> str:
+        account = live.get("account", {})
+        items = [
+            ("Status", live.get("status", "")),
+            ("Config", live.get("config", "")),
+            ("Source", live.get("source", "")),
+            ("Updated", live.get("updated_at", "")),
+            ("Equity", self._money(account.get("equity", 0)) if account else ""),
+            ("Free Margin", self._money(account.get("free_margin", 0)) if account else ""),
+            ("Open Positions", account.get("open_positions", "") if account else ""),
+            ("Error", live.get("error") or ""),
+        ]
+        return "".join(
+            f'<div class="metric"><span>{self._escape(label)}</span><strong>{self._escape(value)}</strong></div>'
+            for label, value in items
+        )
+
+    def _market_live_strip(self, live: dict[str, Any]) -> str:
+        account = live.get("account", {})
+        ticks = live.get("ticks", [])
+        tick = ticks[0] if ticks else {}
+        items = [
+            ("Status", live.get("status", "")),
+            ("Bid", tick.get("bid", "")),
+            ("Ask", tick.get("ask", "")),
+            ("Spread", tick.get("spread_points", "")),
+            ("Equity", self._money(account.get("equity", 0)) if account else ""),
+            ("Open", account.get("open_positions", "") if account else ""),
+            ("Updated", live.get("updated_at_display") or self._format_local_time(live.get("updated_at", ""))),
+        ]
+        return "".join(
+            f'<span><small>{self._escape(label)}</small><strong>{self._escape(value)}</strong></span>'
+            for label, value in items
+        )
+
+    def _control_live_strip(self, summary: dict[str, Any]) -> str:
+        live = summary.get("live", {})
+        tick = live.get("latest_tick", {})
+        tick_summary = live.get("summary", {})
+        agent = summary.get("agent", {})
+        latest = agent.get("latest_decision", {})
+        items = [
+            ("Symbol", tick_summary.get("latest_symbol", "")),
+            ("Bid", tick_summary.get("latest_bid", "")),
+            ("Ask", tick_summary.get("latest_ask", "")),
+            ("Spread", tick_summary.get("latest_spread", "")),
+            ("Source", tick_summary.get("latest_source_label", "")),
+            ("Tick Time", tick.get("tick_time_display", "")),
+            ("Agent", latest.get("action", "none")),
+            ("Risk", latest.get("risk_status", "")),
+        ]
+        return "".join(
+            f'<span><small>{self._escape(label)}</small><strong>{self._escape(value)}</strong></span>'
+            for label, value in items
+        )
+
+    def _control_tick_status(self, summary: dict[str, Any]) -> str:
+        live = summary.get("live", {})
+        collector = live.get("collector", {})
+        tick_summary = live.get("summary", {})
+        items = [
+            ("Source", tick_summary.get("latest_source_label") or collector.get("active_source_label", "")),
+            ("Collector", "polling" if collector.get("polling_active") else "suppressed" if collector.get("polling_suppressed_by_ea") else "stopped"),
+            ("Tape", tick_summary.get("count", 0)),
+            ("Ticks/min", tick_summary.get("ticks_per_minute", 0)),
+            ("Age", "" if tick_summary.get("latest_age_seconds") is None else f"{tick_summary.get('latest_age_seconds')}s"),
+            ("Delta", tick_summary.get("bid_delta", 0)),
+            ("Spread", f"{tick_summary.get('spread_min', 0)} / {tick_summary.get('spread_max', 0)}"),
+        ]
+        return "".join(
+            f'<div><span>{self._escape(label)}</span><strong>{self._escape(value)}</strong></div>'
+            for label, value in items
+        )
+
+    def _live_market_table(self, ticks: list[dict[str, Any]]) -> str:
+        if not ticks:
+            return "<p>No MT5 tick data yet.</p>"
+        rows = []
+        for tick in ticks:
+            rows.append(
+                "<tr>"
+                f"<td>{self._escape(tick.get('symbol', ''))}</td>"
+                f"<td>{self._escape(tick.get('bid', ''))}</td>"
+                f"<td>{self._escape(tick.get('ask', ''))}</td>"
+                f"<td>{self._escape(tick.get('mid', ''))}</td>"
+                f"<td>{self._escape(tick.get('spread_points', ''))}</td>"
+                f"<td>{self._escape(tick.get('atr_points', ''))}</td>"
+                f"<td>{self._escape(tick.get('trend_score', ''))}</td>"
+                f"<td>{self._escape(tick.get('volatility_score', ''))}</td>"
+                f"<td>{self._escape(tick.get('tick_time_display') or self._format_local_time(tick.get('tick_time', '')))}</td>"
+                "</tr>"
+            )
+        return "<table><thead><tr><th>Symbol</th><th>Bid</th><th>Ask</th><th>Mid</th><th>Spread</th><th>ATR</th><th>Trend</th><th>Volatility</th><th>Tick Time</th></tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
+
+    def _tick_tape_table(self, ticks: list[dict[str, Any]]) -> str:
+        if not ticks:
+            return "<p>No tick tape yet.</p>"
+        rows = []
+        for tick in ticks[:20]:
+            rows.append(
+                "<tr>"
+                f"<td>{self._escape(tick.get('captured_at_display') or self._format_local_time(tick.get('captured_at', '')))}</td>"
+                f"<td>{self._escape(tick.get('symbol', ''))}</td>"
+                f"<td>{self._escape(tick.get('bid', ''))}</td>"
+                f"<td>{self._escape(tick.get('ask', ''))}</td>"
+                f"<td>{self._escape(tick.get('mid', ''))}</td>"
+                f"<td>{self._escape(tick.get('spread_points', ''))}</td>"
+                f"<td>{self._escape(tick.get('tick_time_display') or self._format_local_time(tick.get('tick_time', '')))}</td>"
+                "</tr>"
+            )
+        return "<table><thead><tr><th>Captured</th><th>Symbol</th><th>Bid</th><th>Ask</th><th>Mid</th><th>Spread</th><th>Tick Time</th></tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
+
+    def _tick_tape_summary(self, ticks: list[dict[str, Any]]) -> dict[str, Any]:
+        if not ticks:
+            return {
+                "count": 0,
+                "latest_symbol": "",
+                "latest_bid": "",
+                "latest_ask": "",
+                "latest_spread": "",
+                "latest_captured_at": "",
+                "latest_captured_at_display": "",
+                "latest_source": "",
+                "latest_source_label": "",
+                "bid_delta": 0.0,
+                "spread_min": 0.0,
+                "spread_max": 0.0,
+                "latest_age_seconds": None,
+                "ticks_per_minute": 0,
+            }
+        latest = ticks[0]
+        oldest = ticks[-1]
+        spreads = [float(tick.get("spread_points", 0.0) or 0.0) for tick in ticks]
+        latest_bid = float(latest.get("bid", 0.0) or 0.0)
+        oldest_bid = float(oldest.get("bid", 0.0) or 0.0)
+        latest_captured_at = str(latest.get("captured_at", ""))
+        latest_age_seconds = self._seconds_since(latest_captured_at)
+        ticks_per_minute = sum(1 for tick in ticks if self._seconds_since(str(tick.get("captured_at", ""))) <= 60)
+        return {
+            "count": len(ticks),
+            "latest_symbol": latest.get("symbol", ""),
+            "latest_bid": latest.get("bid", ""),
+            "latest_ask": latest.get("ask", ""),
+            "latest_spread": latest.get("spread_points", ""),
+            "latest_captured_at": latest_captured_at,
+            "latest_captured_at_display": self._format_local_time(latest_captured_at),
+            "latest_source": latest.get("source", ""),
+            "latest_source_label": latest.get("source_label") or self._tick_source_label(latest.get("source", "")),
+            "bid_delta": round(latest_bid - oldest_bid, 6),
+            "spread_min": round(min(spreads), 4) if spreads else 0.0,
+            "spread_max": round(max(spreads), 4) if spreads else 0.0,
+            "latest_age_seconds": latest_age_seconds,
+            "ticks_per_minute": ticks_per_minute,
+        }
+
+    def _tick_collector_summary(self) -> dict[str, Any]:
+        running = bool(self.tick_collector_thread and self.tick_collector_thread.is_alive())
+        ea_active = self._ea_socket_active()
+        return {
+            "running": running,
+            "polling_active": running and not ea_active,
+            "polling_suppressed_by_ea": ea_active,
+            "active_source": "ea_socket" if ea_active else "python_polling",
+            "active_source_label": self._tick_source_label("ea_socket" if ea_active else "python_polling"),
+            "last_ea_tick_at": self.last_ea_tick_at.isoformat() if self.last_ea_tick_at else "",
+            "last_ea_tick_at_display": self._format_local_time(self.last_ea_tick_at.isoformat()) if self.last_ea_tick_at else "",
+            "thread": self.tick_collector_thread.name if self.tick_collector_thread else "",
+            "tape_path": str(self.tick_tape_path.relative_to(self.root) if self.tick_tape_path.is_relative_to(self.root) else self.tick_tape_path),
+        }
+
+    def _seconds_since(self, iso_timestamp: str) -> float:
+        if not iso_timestamp:
+            return 0.0
+        try:
+            parsed = self._parse_datetime(iso_timestamp)
+            if parsed is None:
+                return 0.0
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return round(max(0.0, (datetime.now(timezone.utc) - parsed).total_seconds()), 3)
+        except ValueError:
+            return 0.0
+
+    def _ea_socket_active(self, threshold_seconds: float = 5.0) -> bool:
+        if self.last_ea_tick_at is None:
+            return False
+        return (datetime.now(timezone.utc) - self.last_ea_tick_at.astimezone(timezone.utc)).total_seconds() <= threshold_seconds
+
+    def _tick_source_label(self, source: Any) -> str:
+        value = str(source or "")
+        if value == "ea_socket":
+            return "EA socket"
+        if value == "python_polling":
+            return "Python polling"
+        if value == "bridge_http":
+            return "HTTP bridge"
+        return value or "unknown"
+
+    def _tick_tape_metrics(self, ticks: list[dict[str, Any]]) -> str:
+        summary = self._tick_tape_summary(ticks)
+        collector = self._tick_collector_summary()
+        items = [
+            ("Source", summary.get("latest_source_label") or collector.get("active_source_label", "")),
+            ("Collector", "polling" if collector.get("polling_active") else "suppressed" if collector.get("polling_suppressed_by_ea") else "stopped"),
+            ("Ticks", summary["count"]),
+            ("Ticks/min", summary["ticks_per_minute"]),
+            ("Tick Age", "" if summary["latest_age_seconds"] is None else f"{summary['latest_age_seconds']}s"),
+            ("Latest Symbol", summary["latest_symbol"]),
+            ("Latest Bid", summary["latest_bid"]),
+            ("Latest Ask", summary["latest_ask"]),
+            ("Latest Spread", summary["latest_spread"]),
+        ]
+        return "".join(
+            f'<span><small>{self._escape(label)}</small><strong>{self._escape(value)}</strong></span>'
+            for label, value in items
+        )
+
+    def _tick_tape_chart(self, ticks: list[dict[str, Any]]) -> str:
+        if len(ticks) < 2:
+            return "<p>No tick chart yet.</p>"
+        chronological = list(reversed(ticks[-120:]))
+        bids = [float(tick.get("bid", 0.0) or 0.0) for tick in chronological]
+        asks = [float(tick.get("ask", 0.0) or 0.0) for tick in chronological]
+        spreads = [float(tick.get("spread_points", 0.0) or 0.0) for tick in chronological]
+        prices = bids + asks
+        upper = max(prices)
+        lower = min(prices)
+        price_span = upper - lower or 1.0
+        spread_upper = max(spreads) if spreads else 1.0
+        spread_span = spread_upper or 1.0
+        width, height = 1080, 260
+        left, right, top, bottom = 58, 78, 34, 44
+        plot_width = width - left - right
+        plot_height = height - top - bottom
+        count = max(len(chronological) - 1, 1)
+
+        def point(index: int, value: float) -> str:
+            x = left + (index / count) * plot_width
+            y = top + ((upper - value) / price_span) * plot_height
+            return f"{x:.2f},{y:.2f}"
+
+        def spread_point(index: int, value: float) -> str:
+            x = left + (index / count) * plot_width
+            y = top + plot_height - (value / spread_span) * min(52, plot_height * 0.35)
+            return f"{x:.2f},{y:.2f}"
+
+        bid_points = " ".join(point(index, value) for index, value in enumerate(bids))
+        ask_points = " ".join(point(index, value) for index, value in enumerate(asks))
+        spread_points = " ".join(spread_point(index, value) for index, value in enumerate(spreads))
+        latest = chronological[-1]
+        return f"""
+        <svg viewBox="0 0 {width} {height}" role="img" aria-label="Tick tape bid ask spread chart">
+          <rect x="0" y="0" width="{width}" height="{height}" fill="#0f1720"></rect>
+          <text x="{left}" y="22" class="market-title">Tick Tape</text>
+          <line x1="{left}" y1="{top + plot_height}" x2="{width - right}" y2="{top + plot_height}" class="market-grid"></line>
+          <line x1="{left}" y1="{top}" x2="{left}" y2="{top + plot_height}" class="market-axis"></line>
+          <polyline points="{bid_points}" fill="none" stroke="#22c55e" stroke-width="2.4"></polyline>
+          <polyline points="{ask_points}" fill="none" stroke="#ef4444" stroke-width="1.8" stroke-dasharray="5 4"></polyline>
+          <polyline points="{spread_points}" fill="none" stroke="#f2c94c" stroke-width="1.6"></polyline>
+          <text x="{width - right - 180}" y="22" class="market-label">bid {self._escape(latest.get('bid', ''))} / ask {self._escape(latest.get('ask', ''))}</text>
+          <text x="{left}" y="{height - 14}" class="market-label">{len(chronological)} ticks, spread max {max(spreads):.2f}</text>
+        </svg>
+        """
+
+    def _record_live_ticks(self, ticks: list[dict[str, Any]], return_recent: bool = True, source: str = "python_polling") -> list[dict[str, Any]]:
+        if not ticks:
+            return self._recent_ticks()
+        created = False
+        new_rows = []
+        with self.tick_tape_lock:
+            captured_at = self._now()
+            for tick in ticks:
+                row = {
+                    "captured_at": captured_at,
+                    "captured_at_display": self._format_local_time(captured_at),
+                    "symbol": tick.get("symbol", ""),
+                    "bid": tick.get("bid", ""),
+                    "ask": tick.get("ask", ""),
+                    "mid": tick.get("mid", ""),
+                    "spread_points": tick.get("spread_points", ""),
+                    "tick_time": tick.get("tick_time", ""),
+                    "tick_time_display": self._format_local_time(tick.get("tick_time", "")),
+                    "source": tick.get("source") or source,
+                    "source_label": self._tick_source_label(tick.get("source") or source),
+                }
+                key = (str(row["symbol"]), str(row["tick_time"]), str(row["bid"]), str(row["ask"]))
+                if key in self.tick_recent_keys:
+                    continue
+                self.tick_recent_keys.add(key)
+                new_rows.append(row)
+            if len(self.tick_recent_keys) > 1000:
+                self.tick_recent_keys = set(list(self.tick_recent_keys)[-500:])
+            if new_rows:
+                self.tick_tape_path.parent.mkdir(parents=True, exist_ok=True)
+                with self.tick_tape_path.open("a", encoding="utf-8") as handle:
+                    for row in new_rows:
+                        handle.write(json.dumps(row, sort_keys=True) + "\n")
+                created = True
+            recent = self._recent_ticks_unlocked(limit=50) if return_recent else list(reversed(new_rows))
+            if created and source == "ea_socket":
+                self.last_ea_tick_at = datetime.now(timezone.utc)
+            if created and source == "python_polling":
+                self.last_python_poll_at = datetime.now(timezone.utc)
+        if created:
+            self._notify_event_stream()
+        return recent
+
+    def _ingest_bridge_tick(self, body: str) -> dict[str, Any]:
+        try:
+            payload = json.loads(body or "{}")
+        except json.JSONDecodeError as exc:
+            return {"status": "error", "error": f"invalid_json:{exc.msg}"}
+        rows = payload if isinstance(payload, list) else [payload]
+        ticks = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            symbol = str(row.get("symbol", "")).upper()
+            if not symbol:
+                continue
+            try:
+                bid = float(row.get("bid", 0.0) or 0.0)
+                ask = float(row.get("ask", 0.0) or 0.0)
+                point = float(row.get("point", 0.0) or 0.0)
+                digits = int(row.get("digits", 6) or 6)
+            except (TypeError, ValueError):
+                continue
+            spread_points = row.get("spread_points")
+            if spread_points is None:
+                spread_points = round((ask - bid) / point, 2) if point > 0 else round(ask - bid, 6)
+            ticks.append(
+                {
+                    "symbol": symbol,
+                    "bid": round(bid, digits),
+                    "ask": round(ask, digits),
+                    "mid": round((bid + ask) / 2, digits),
+                    "spread_points": spread_points,
+                    "tick_time": row.get("tick_time") or row.get("time") or self._now(),
+                    "source": "ea_socket",
+                }
+            )
+        if not ticks:
+            return {"status": "error", "error": "no_valid_ticks"}
+        self.last_ea_tick_at = datetime.now(timezone.utc)
+        recent = self._record_live_ticks(ticks, return_recent=False, source="ea_socket")
+        return {
+            "status": "accepted",
+            "received": len(ticks),
+            "latest_tick": recent[0] if recent else {},
+            "sequence": self.event_sequence,
+        }
+
+    def _ingest_bridge_tick_query(self, query: str) -> dict[str, Any]:
+        params = parse_qs(query)
+
+        def value(name: str, default: Any = "") -> Any:
+            values = params.get(name)
+            return values[0] if values else default
+
+        payload = {
+            "symbol": value("symbol"),
+            "bid": value("bid", 0),
+            "ask": value("ask", 0),
+            "point": value("point", 0),
+            "digits": value("digits", 6),
+            "spread_points": value("spread_points", None),
+            "tick_time": value("tick_time", self._now()),
+        }
+        return self._ingest_bridge_tick(json.dumps(payload))
+
+    def _recent_ticks(self, limit: int = 50) -> list[dict[str, Any]]:
+        with self.tick_tape_lock:
+            return self._recent_ticks_unlocked(limit=limit)
+
+    def _recent_ticks_unlocked(self, limit: int = 50) -> list[dict[str, Any]]:
+        if not self.tick_tape_path.exists():
+            return []
+        rows: deque[dict[str, Any]] = deque(maxlen=limit)
+        with self.tick_tape_path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                stripped = line.strip()
+                if stripped:
+                    row = json.loads(stripped)
+                    row.setdefault("captured_at_display", self._format_local_time(row.get("captured_at", "")))
+                    row.setdefault("tick_time_display", self._format_local_time(row.get("tick_time", "")))
+                    row.setdefault("source", "unknown")
+                    row.setdefault("source_label", self._tick_source_label(row.get("source", "")))
+                    rows.append(row)
+        return list(rows)[::-1]
 
     def _market_indicators(self, candles: list[dict[str, Any]]) -> list[dict[str, Any]]:
         indicators = []
@@ -751,14 +1640,85 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
             for label, value in items
         )
 
+    def _agent_status_strip(self, console: dict[str, Any]) -> str:
+        monitor = console.get("monitor", {})
+        latest = console.get("latest_decision", {})
+        items = [
+            ("Monitor", monitor.get("status", "stopped")),
+            ("Config", console.get("config", "")),
+            ("Mode", console.get("mode", "")),
+            ("Source", console.get("market_source", "")),
+            ("Symbol", ", ".join(console.get("symbols", []))),
+            ("Latest", latest.get("action", "none")),
+            ("Risk", latest.get("risk_status", "")),
+            ("Experiences", console.get("experience_count", 0)),
+        ]
+        return "".join(
+            f'<span><small>{self._escape(label)}</small><strong>{self._escape(value)}</strong></span>'
+            for label, value in items
+        )
+
+    def _agent_controls(self, monitor: dict[str, Any]) -> str:
+        if monitor.get("running"):
+            return """
+            <form method="post" action="/agent/monitor/stop">
+              <div class="actions"><button type="submit">Stop Agent</button></div>
+            </form>
+            """
+        configs = self._agent_config_names()
+        if not configs:
+            return "<p>No safe agent config available.</p>"
+        preferred = "mt5-paper.json" if "mt5-paper.json" in configs else configs[0]
+        options = "".join(
+            f'<option value="{self._escape(name)}" {"selected" if name == preferred else ""}>{self._escape(name)}</option>'
+            for name in configs
+        )
+        return f"""
+        <form method="post" action="/agent/monitor/start">
+          <div class="market-toolbar">
+            <label>Config<select name="config">{options}</select></label>
+            <label>Iterations<input name="max_iterations" type="number" min="1" max="10000" value="100"></label>
+            <label>Interval<input name="interval_seconds" type="number" min="0.1" max="3600" step="0.1" value="1"></label>
+            <button type="submit">Start Agent</button>
+          </div>
+        </form>
+        """
+
+    def _agent_decision_card(self, decision: dict[str, Any]) -> str:
+        if not decision:
+            return "<p>No decisions recorded yet. Start the agent with mt5-paper.json to collect decisions.</p>"
+        reasons = decision.get("reasons", [])
+        reason_items = "".join(f"<li>{self._escape(reason)}</li>" for reason in reasons) if reasons else "<li>none</li>"
+        return f"""
+        <div class="decision-card">
+          <div><span>Time</span><strong>{self._escape(decision.get("timestamp", ""))}</strong></div>
+          <div><span>Symbol</span><strong>{self._escape(decision.get("symbol", ""))}</strong></div>
+          <div><span>Action</span><strong>{self._escape(decision.get("action", ""))}</strong></div>
+          <div><span>Confidence</span><strong>{self._escape(decision.get("confidence", ""))}</strong></div>
+          <div><span>Risk</span><strong>{self._escape(decision.get("risk_status", ""))}</strong></div>
+          <div><span>Execution</span><strong>{self._escape(decision.get("execution", ""))}</strong></div>
+          <div class="decision-reasons"><span>Reasons</span><ul>{reason_items}</ul></div>
+        </div>
+        """
+
     def _monitor_summary(self) -> dict[str, Any]:
         self._refresh_monitor_state()
         with self.monitor_lock:
             return {
                 **self.monitor_state,
-                "recent_events": list(self.monitor_events[-20:])[::-1],
+                "started_at_display": self._format_local_time(self.monitor_state.get("started_at")),
+                "stopped_at_display": self._format_local_time(self.monitor_state.get("stopped_at")),
+                "recent_events": [self._monitor_event_row(event) for event in list(self.monitor_events[-20:])[::-1]],
                 "event_count": len(self.monitor_events),
             }
+
+    def _monitor_event_row(self, event: dict[str, Any]) -> dict[str, Any]:
+        timestamp = event.get("timestamp", "")
+        return {
+            **event,
+            "timestamp": self._format_local_time(timestamp),
+            "timestamp_raw": timestamp,
+        }
 
     def _monitor_metrics(self, monitor: dict[str, Any]) -> str:
         items = [
@@ -767,8 +1727,8 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
             ("Config", monitor.get("config") or ""),
             ("Max Iterations", monitor.get("max_iterations", 0)),
             ("Events", monitor.get("event_count", 0)),
-            ("Started", monitor.get("started_at") or ""),
-            ("Stopped", monitor.get("stopped_at") or ""),
+            ("Started", monitor.get("started_at_display") or ""),
+            ("Stopped", monitor.get("stopped_at_display") or ""),
             ("Error", monitor.get("error") or ""),
         ]
         return "".join(
@@ -838,7 +1798,7 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
                 f"<td>{self._escape(position.get('entry_price', ''))}</td>"
                 f"<td>{self._escape(position.get('stop_loss', ''))}</td>"
                 f"<td>{self._escape(position.get('take_profit', ''))}</td>"
-                f"<td>{self._escape(position.get('opened_at', ''))}</td>"
+                f"<td>{self._escape(self._format_local_time(position.get('opened_at', '')))}</td>"
                 "</tr>"
             )
         return "<table><thead><tr><th>Symbol</th><th>Side</th><th>Lot</th><th>Entry</th><th>SL</th><th>TP</th><th>Opened</th></tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
@@ -870,7 +1830,7 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
             r_class = "positive" if r_multiple > 0 else "negative" if r_multiple < 0 else ""
             rows.append(
                 "<tr>"
-                f"<td>{self._escape(close.get('closed_at', ''))}</td>"
+                f"<td>{self._escape(self._format_local_time(close.get('closed_at', '')))}</td>"
                 f"<td>{self._escape(close.get('symbol', ''))}</td>"
                 f"<td>{self._escape(close.get('side', ''))}</td>"
                 f"<td>{self._escape(close.get('exit_reason', ''))}</td>"
@@ -983,6 +1943,32 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
             f'<option value="{self._escape(symbol)}" {"selected" if symbol == selected else ""}>{self._escape(symbol)}</option>'
             for symbol in symbols
         )
+
+    def _market_timeframe_options(self, selected: str) -> str:
+        safe_selected = self._safe_timeframe(selected)
+        return "".join(
+            f'<option value="{label}" {"selected" if label == safe_selected else ""}>{label}</option>'
+            for label in ["M1", "M5", "M15", "M30", "H1", "H4", "D1"]
+        )
+
+    def _safe_timeframe(self, value: str) -> str:
+        label = str(value or "H1").upper()
+        return label if label in {"M1", "M5", "M15", "M30", "H1", "H4", "D1"} else "H1"
+
+    def _mt5_timeframe(self, mt5: Any, label: str) -> Any:
+        mapping = {
+            "M1": "TIMEFRAME_M1",
+            "M5": "TIMEFRAME_M5",
+            "M15": "TIMEFRAME_M15",
+            "M30": "TIMEFRAME_M30",
+            "H1": "TIMEFRAME_H1",
+            "H4": "TIMEFRAME_H4",
+            "D1": "TIMEFRAME_D1",
+        }
+        attr = mapping.get(self._safe_timeframe(label), "TIMEFRAME_H1")
+        if hasattr(mt5, attr):
+            return getattr(mt5, attr)
+        return getattr(mt5, "TIMEFRAME_M15")
 
     def _candlestick_chart(
         self,
@@ -1248,14 +2234,35 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
         decision = row.get("decision", {})
         risk = row.get("risk", {})
         execution = row.get("execution") or {}
+        raw_timestamp = decision.get("timestamp") or row.get("timestamp", "")
         return {
-            "timestamp": decision.get("timestamp") or row.get("timestamp", ""),
+            "timestamp": self._format_local_time(raw_timestamp),
+            "timestamp_raw": raw_timestamp,
             "symbol": decision.get("symbol", ""),
             "action": decision.get("action", ""),
             "confidence": decision.get("confidence", ""),
             "risk_status": risk.get("status", ""),
             "execution": execution.get("message") or execution.get("accepted", ""),
             "reasons": decision.get("reason_codes", []) or risk.get("reasons", []),
+        }
+
+    def _position_row(self, row: dict[str, Any]) -> dict[str, Any]:
+        opened_at = row.get("opened_at", "")
+        return {
+            **row,
+            "opened_at": self._format_local_time(opened_at),
+            "opened_at_raw": opened_at,
+        }
+
+    def _close_row(self, row: dict[str, Any]) -> dict[str, Any]:
+        closed_at = row.get("closed_at", "")
+        opened_at = row.get("opened_at", "")
+        return {
+            **row,
+            "closed_at": self._format_local_time(closed_at),
+            "closed_at_raw": closed_at,
+            "opened_at": self._format_local_time(opened_at),
+            "opened_at_raw": opened_at,
         }
 
     def _decision_reason_counts(self, rows: list[dict[str, Any]]) -> dict[str, int]:
@@ -1382,6 +2389,17 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
             return []
         return sorted(path.name for path in self.configs_dir.glob("*.json"))
 
+    def _agent_config_names(self) -> list[str]:
+        names = []
+        for name in self._config_names():
+            try:
+                settings = load_settings(str(self._safe_config_path(name)))
+            except Exception:
+                continue
+            if getattr(settings, "mode", "paper") == "paper":
+                names.append(name)
+        return names
+
     def _experiment_names(self) -> list[str]:
         if not self.experiments_dir.exists():
             return []
@@ -1458,6 +2476,7 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
                 }
                 self._write_monitor_snapshot_locked()
             thread.start()
+            self._notify_event_stream()
             return {"status": "started"}
         except Exception as exc:
             return {"error": str(exc)}
@@ -1484,12 +2503,14 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
                 }
             )
             self._write_monitor_snapshot_locked()
+        self._notify_event_stream()
 
     def _record_monitor_event(self, event: dict[str, Any]) -> None:
         with self.monitor_lock:
             self.monitor_events.append(dict(event))
             self.monitor_events = self.monitor_events[-500:]
             self._write_monitor_snapshot_locked()
+        self._notify_event_stream()
 
     def _stop_monitor(self) -> dict[str, Any]:
         with self.monitor_lock:
@@ -1498,7 +2519,13 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
             self.monitor_state["status"] = "stopping"
             self.monitor_stop_event.set()
             self._write_monitor_snapshot_locked()
+        self._notify_event_stream()
         return {"status": "stopping"}
+
+    def _notify_event_stream(self) -> None:
+        with self.event_condition:
+            self.event_sequence += 1
+            self.event_condition.notify_all()
 
     def _refresh_monitor_state(self) -> None:
         with self.monitor_lock:
@@ -1580,12 +2607,56 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
 
     def _default_settings(self) -> Any:
         configs = self._config_names()
+        preferred = "paper-demo.json"
+        if preferred in configs:
+            try:
+                return load_settings(str(self._safe_config_path(preferred)))
+            except Exception:
+                pass
         if configs:
             try:
                 return load_settings(str(self._safe_config_path(configs[0])))
             except Exception:
                 pass
         return load_settings(None)
+
+    def _live_market_settings(self) -> tuple[str, Any]:
+        configs = self._config_names()
+        for preferred in ["mt5-paper.json", "mt5-demo-live.json"]:
+            if preferred in configs:
+                try:
+                    return preferred, load_settings(str(self._safe_config_path(preferred)))
+                except Exception:
+                    pass
+        for name in configs:
+            try:
+                settings = load_settings(str(self._safe_config_path(name)))
+            except Exception:
+                continue
+            if getattr(settings, "market_source", "demo") == "mt5":
+                return name, settings
+        return "default", load_settings(None)
+
+    def _agent_settings(self) -> tuple[str, Any]:
+        monitor_config = self.monitor_state.get("config")
+        if monitor_config:
+            try:
+                return str(monitor_config), load_settings(str(self._safe_config_path(str(monitor_config))))
+            except Exception:
+                pass
+        configs = self._config_names()
+        for preferred in ["mt5-paper.json", "paper-demo.json"]:
+            if preferred in configs:
+                try:
+                    return preferred, load_settings(str(self._safe_config_path(preferred)))
+                except Exception:
+                    pass
+        if configs:
+            try:
+                return configs[0], load_settings(str(self._safe_config_path(configs[0])))
+            except Exception:
+                pass
+        return "default", load_settings(None)
 
     def _rooted_path(self, path: str | Path) -> Path:
         candidate = Path(path)
@@ -1594,9 +2665,32 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
         return self.root / candidate
 
     def _now(self) -> str:
-        from datetime import datetime, timezone
+        return datetime.now(LOCAL_TZ).isoformat()
 
-        return datetime.now(timezone.utc).isoformat()
+    def _parse_datetime(self, value: Any) -> datetime | None:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return datetime.fromtimestamp(float(value), timezone.utc)
+        text = str(value).strip()
+        if not text:
+            return None
+        if text.isdigit():
+            return datetime.fromtimestamp(int(text), timezone.utc)
+        try:
+            normalized = text.replace("Z", "+00:00")
+            parsed = datetime.fromisoformat(normalized)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed
+        except ValueError:
+            return None
+
+    def _format_local_time(self, value: Any) -> str:
+        parsed = self._parse_datetime(value)
+        if parsed is None:
+            return str(value or "")
+        return parsed.astimezone(LOCAL_TZ).strftime("%d %b %Y %H:%M:%S WIB")
 
     def _live_refresh_script(self) -> str:
         return """
@@ -1605,6 +2699,9 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
   const refreshMs = 3000;
   const $ = (id) => document.getElementById(id);
   const money = (value) => `$${Number(value || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  let marketCandleLimit = 80;
+  let marketTimeframe = "H1";
+  let tickTapeLimit = 120;
 
   function clear(node) {
     while (node.firstChild) node.removeChild(node.firstChild);
@@ -1664,6 +2761,83 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
   function countTable(id, counts, emptyText) {
     const rows = Object.entries(counts || {}).map(([key, value]) => ({ key, value }));
     table(id, [{ label: "Reason", value: "key" }, { label: "Count", value: "value" }], rows, emptyText);
+  }
+
+  function marketStrip(id, items) {
+    const root = $(id);
+    if (!root) return;
+    clear(root);
+    for (const [label, value] of items) {
+      const item = document.createElement("span");
+      const small = document.createElement("small");
+      small.textContent = label;
+      const strong = document.createElement("strong");
+      strong.textContent = value ?? "";
+      item.append(small, strong);
+      root.append(item);
+    }
+  }
+
+  function tickTapeChart(id, ticks) {
+    const root = $(id);
+    if (!root) return;
+    clear(root);
+    if (!ticks || ticks.length < 2) {
+      const p = document.createElement("p");
+      p.textContent = "No tick chart yet.";
+      root.append(p);
+      return;
+    }
+    const chronological = ticks.slice(0, 120).reverse();
+    const bids = chronological.map((tick) => Number(tick.bid || 0));
+    const asks = chronological.map((tick) => Number(tick.ask || 0));
+    const spreads = chronological.map((tick) => Number(tick.spread_points || 0));
+    const prices = bids.concat(asks);
+    const upper = Math.max(...prices);
+    const lower = Math.min(...prices);
+    const priceSpan = upper - lower || 1;
+    const spreadUpper = Math.max(...spreads) || 1;
+    const width = 1080, height = 260, left = 58, right = 78, top = 34, bottom = 44;
+    const plotWidth = width - left - right;
+    const plotHeight = height - top - bottom;
+    const count = Math.max(chronological.length - 1, 1);
+    const pricePoint = (index, value) => `${(left + (index / count) * plotWidth).toFixed(2)},${(top + ((upper - value) / priceSpan) * plotHeight).toFixed(2)}`;
+    const spreadPoint = (index, value) => `${(left + (index / count) * plotWidth).toFixed(2)},${(top + plotHeight - (value / spreadUpper) * Math.min(52, plotHeight * 0.35)).toFixed(2)}`;
+    const svg = svgEl("svg");
+    svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+    svg.setAttribute("role", "img");
+    svg.setAttribute("aria-label", "Tick tape bid ask spread chart");
+    const bg = svgEl("rect");
+    bg.setAttribute("x", 0);
+    bg.setAttribute("y", 0);
+    bg.setAttribute("width", width);
+    bg.setAttribute("height", height);
+    bg.setAttribute("fill", "#0f1720");
+    svg.append(bg);
+    addSvgText(svg, "Tick Tape", left, 22, "market-title");
+    const axis = svgEl("line");
+    axis.setAttribute("x1", left);
+    axis.setAttribute("y1", top + plotHeight);
+    axis.setAttribute("x2", width - right);
+    axis.setAttribute("y2", top + plotHeight);
+    axis.setAttribute("class", "market-grid");
+    svg.append(axis);
+    const addLine = (points, color, widthValue, dash = "") => {
+      const line = svgEl("polyline");
+      line.setAttribute("points", points);
+      line.setAttribute("fill", "none");
+      line.setAttribute("stroke", color);
+      line.setAttribute("stroke-width", widthValue);
+      if (dash) line.setAttribute("stroke-dasharray", dash);
+      svg.append(line);
+    };
+    addLine(bids.map((value, index) => pricePoint(index, value)).join(" "), "#22c55e", "2.4");
+    addLine(asks.map((value, index) => pricePoint(index, value)).join(" "), "#ef4444", "1.8", "5 4");
+    addLine(spreads.map((value, index) => spreadPoint(index, value)).join(" "), "#f2c94c", "1.6");
+    const latest = chronological[chronological.length - 1] || {};
+    addSvgText(svg, `bid ${latest.bid || ""} / ask ${latest.ask || ""}`, width - right - 180, 22, "market-label");
+    addSvgText(svg, `${chronological.length} ticks, spread max ${Math.max(...spreads).toFixed(2)}`, left, height - 14, "market-label");
+    root.append(svg);
   }
 
   function svgEl(name) {
@@ -1806,10 +2980,17 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
       root.append(p);
       return;
     }
-    const selected = candles.slice(-80);
+    const selected = candles.slice(-marketCandleLimit);
     const indicators = (overlays.indicators || []).slice(-selected.length);
     const highs = selected.map((row) => Number(row.high ?? row.close ?? 0));
     const lows = selected.map((row) => Number(row.low ?? row.close ?? 0));
+    const currentTick = overlays.current_tick || {};
+    for (const key of ["bid", "ask", "mid"]) {
+      if (currentTick[key] !== undefined && currentTick[key] !== null) {
+        highs.push(Number(currentTick[key]));
+        lows.push(Number(currentTick[key]));
+      }
+    }
     for (const row of indicators) {
       for (const key of ["ma_fast", "ma_slow", "atr_upper", "atr_lower"]) {
         if (row[key] !== undefined && row[key] !== null) {
@@ -1952,6 +3133,24 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
         svg.append(line);
         addSvgText(svg, label, width - right - 80, y - 4, "chart-label");
       }
+    }
+    for (const [key, label, color] of [["bid", "BID", "#22c55e"], ["ask", "ASK", "#ef4444"]]) {
+      if (currentTick[key] === undefined || currentTick[key] === null) continue;
+      const value = Number(currentTick[key]);
+      const y = yFor(value);
+      const line = svgEl("line");
+      line.setAttribute("x1", left);
+      line.setAttribute("y1", y);
+      line.setAttribute("x2", width - right);
+      line.setAttribute("y2", y);
+      line.setAttribute("stroke", color);
+      line.setAttribute("stroke-width", key === "bid" ? "2" : "1.5");
+      line.setAttribute("stroke-dasharray", key === "bid" ? "0" : "6 4");
+      const titleNode = svgEl("title");
+      titleNode.textContent = `${label} ${value}`;
+      line.append(titleNode);
+      svg.append(line);
+      addSvgText(svg, `${label} ${value}`, width - right - 92, y - 5, "market-signal-label");
     }
     const signals = overlays.signals || [];
     if (signals.length) {
@@ -2130,6 +3329,91 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
     countTable("rejection-reasons-table", pnl.rejection_reasons, "No data yet.");
   }
 
+  function decisionCard(id, decision) {
+    const root = $(id);
+    if (!root) return;
+    clear(root);
+    if (!decision || !decision.action) {
+      const p = document.createElement("p");
+      p.textContent = "No decisions recorded yet. Start the agent with mt5-paper.json to collect decisions.";
+      root.append(p);
+      return;
+    }
+    const card = document.createElement("div");
+    card.className = "decision-card";
+    const addItem = (label, value) => {
+      const item = document.createElement("div");
+      const span = document.createElement("span");
+      span.textContent = label;
+      const strong = document.createElement("strong");
+      strong.textContent = value ?? "";
+      item.append(span, strong);
+      card.append(item);
+    };
+    addItem("Time", decision.timestamp || "");
+    addItem("Symbol", decision.symbol || "");
+    addItem("Action", decision.action || "");
+    addItem("Confidence", decision.confidence || "");
+    addItem("Risk", decision.risk_status || "");
+    addItem("Execution", decision.execution || "");
+    const reasons = document.createElement("div");
+    reasons.className = "decision-reasons";
+    const span = document.createElement("span");
+    span.textContent = "Reasons";
+    const ul = document.createElement("ul");
+    for (const reason of decision.reasons || ["none"]) {
+      const li = document.createElement("li");
+      li.textContent = reason;
+      ul.append(li);
+    }
+    reasons.append(span, ul);
+    card.append(reasons);
+    root.append(card);
+  }
+
+  function renderAgent(consoleState) {
+    const monitor = consoleState.monitor || {};
+    const latest = consoleState.latest_decision || {};
+    marketStrip("agent-status-strip", [
+      ["Monitor", monitor.status || "stopped"],
+      ["Config", consoleState.config || ""],
+      ["Mode", consoleState.mode || ""],
+      ["Source", consoleState.market_source || ""],
+      ["Symbol", (consoleState.symbols || []).join(", ")],
+      ["Latest", latest.action || "none"],
+      ["Risk", latest.risk_status || ""],
+      ["Experiences", consoleState.experience_count || 0],
+    ]);
+    decisionCard("agent-decision-card", latest);
+    table("agent-decisions-table", [
+      { label: "Time", value: "timestamp" },
+      { label: "Symbol", value: "symbol" },
+      { label: "Action", value: "action" },
+      { label: "Confidence", value: "confidence" },
+      { label: "Risk", value: "risk_status" },
+      { label: "Execution", value: "execution" },
+      { label: "Reasons", value: (row) => (row.reasons || []).join(", ") },
+    ], consoleState.recent_decisions, "No decisions recorded yet.");
+    table("agent-open-positions", [
+      { label: "Symbol", value: "symbol" },
+      { label: "Side", value: "side" },
+      { label: "Lot", value: "volume" },
+      { label: "Entry", value: "entry_price" },
+      { label: "SL", value: "stop_loss" },
+      { label: "TP", value: "take_profit" },
+      { label: "Opened", value: "opened_at" },
+    ], consoleState.open_positions, "No open paper positions.");
+    table("agent-events-table", [
+      { label: "Time", value: "timestamp" },
+      { label: "Iter", value: "iteration" },
+      { label: "Symbol", value: "symbol" },
+      { label: "Action/Reason", value: (row) => row.action || row.reason || "" },
+      { label: "Risk", value: "risk_status" },
+      { label: "Execution", value: "execution" },
+      { label: "Closed", value: "closed_positions" },
+    ], (monitor.recent_events || []), "No monitor events yet.");
+  }
+
   async function refreshOperations() {
     if (!$("monitor-metrics")) return;
     const [operations, monitor] = await Promise.all([
@@ -2145,35 +3429,339 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
     renderPnl(pnl);
   }
 
+  async function refreshAgent() {
+    if (!$("agent-status-strip")) return;
+    const consoleState = await fetch("/api/agent-console").then((res) => res.json());
+    renderAgent(consoleState);
+  }
+
   async function refreshMarket() {
     if (!$("market-candles")) return;
-    const chart = await fetch("/api/market-chart").then((res) => res.json());
+    const timeframeSelect = $("market-timeframe-select");
+    const candleInput = $("market-candle-limit");
+    marketTimeframe = timeframeSelect ? timeframeSelect.value : marketTimeframe;
+    marketCandleLimit = Math.max(20, Math.min(300, Number(candleInput && candleInput.value ? candleInput.value : marketCandleLimit)));
+    if (candleInput) candleInput.value = marketCandleLimit;
+    const chart = await fetch(`/api/market-chart?timeframe=${encodeURIComponent(marketTimeframe)}&candles=${marketCandleLimit}`).then((res) => res.json());
     const select = $("market-symbol-select");
     const selected = (select && select.value) || (chart.symbols || [])[0] || "";
     const count = ((chart.series || {})[selected] || []).length;
     if ($("market-selected-symbol")) $("market-selected-symbol").textContent = selected;
     if ($("market-candle-count")) $("market-candle-count").textContent = count;
+    if ($("market-timeframe-label")) $("market-timeframe-label").textContent = chart.timeframe || marketTimeframe;
     candlestickChart("market-candles", selected, (chart.series || {})[selected] || [], (chart.overlays || {})[selected] || {});
+  }
+
+  async function refreshLiveMarket() {
+    if (!$("market-live-strip")) return;
+    const live = await fetch("/api/live-market").then((res) => res.json());
+    const account = live.account || {};
+    const tick = (live.ticks || [])[0] || {};
+    marketStrip("market-live-strip", [
+      ["Status", live.status || ""],
+      ["Bid", tick.bid ?? ""],
+      ["Ask", tick.ask ?? ""],
+      ["Spread", tick.spread_points ?? ""],
+      ["Equity", account.equity === undefined ? "" : money(account.equity)],
+      ["Open", account.open_positions ?? ""],
+      ["Updated", live.updated_at_display || live.updated_at || ""],
+    ]);
+  }
+
+  async function refreshTickTape() {
+    if (!$("tick-tape-metrics")) return;
+    const limitSelect = $("tick-tape-limit");
+    tickTapeLimit = Math.max(1, Math.min(500, Number(limitSelect && limitSelect.value ? limitSelect.value : tickTapeLimit)));
+    const payload = await fetch(`/api/tick-tape?limit=${tickTapeLimit}`).then((res) => res.json());
+    const summary = payload.summary || {};
+    const collector = payload.collector || {};
+    marketStrip("tick-tape-metrics", [
+      ["Source", summary.latest_source_label || collector.active_source_label || ""],
+      ["Collector", collector.polling_active ? "polling" : collector.polling_suppressed_by_ea ? "suppressed" : "stopped"],
+      ["Ticks", summary.count || 0],
+      ["Ticks/min", summary.ticks_per_minute || 0],
+      ["Tick Age", summary.latest_age_seconds === null || summary.latest_age_seconds === undefined ? "" : `${summary.latest_age_seconds}s`],
+      ["Latest Symbol", summary.latest_symbol || ""],
+      ["Latest Bid", summary.latest_bid ?? ""],
+      ["Latest Ask", summary.latest_ask ?? ""],
+      ["Latest Spread", summary.latest_spread ?? ""],
+    ]);
+    tickTapeChart("tick-tape-chart", payload.ticks || []);
+  }
+
+  function controlStatusList(id, items) {
+    const root = $(id);
+    if (!root) return;
+    clear(root);
+    for (const [label, value] of items) {
+      const item = document.createElement("div");
+      const span = document.createElement("span");
+      span.textContent = label;
+      const strong = document.createElement("strong");
+      strong.textContent = value ?? "";
+      item.append(span, strong);
+      root.append(item);
+    }
+  }
+
+  function renderControl(payload) {
+    if (!$("control-root")) return;
+    const live = payload.live || {};
+    const summary = live.summary || {};
+    const tick = live.latest_tick || {};
+    const collector = live.collector || {};
+    const agent = payload.agent || {};
+    const monitor = agent.monitor || {};
+    const latest = agent.latest_decision || {};
+    const operations = payload.operations || {};
+    marketStrip("control-live-strip", [
+      ["Symbol", summary.latest_symbol || ""],
+      ["Bid", summary.latest_bid ?? ""],
+      ["Ask", summary.latest_ask ?? ""],
+      ["Spread", summary.latest_spread ?? ""],
+      ["Source", summary.latest_source_label || ""],
+      ["Tick Time", tick.tick_time_display || ""],
+      ["Agent", latest.action || "none"],
+      ["Risk", latest.risk_status || ""],
+    ]);
+    controlStatusList("control-tick-status", [
+      ["Source", summary.latest_source_label || collector.active_source_label || ""],
+      ["Collector", collector.polling_active ? "polling" : collector.polling_suppressed_by_ea ? "suppressed" : "stopped"],
+      ["Tape", summary.count || 0],
+      ["Ticks/min", summary.ticks_per_minute || 0],
+      ["Age", summary.latest_age_seconds === null || summary.latest_age_seconds === undefined ? "" : `${summary.latest_age_seconds}s`],
+      ["Delta", summary.bid_delta || 0],
+      ["Spread", `${summary.spread_min || 0} / ${summary.spread_max || 0}`],
+    ]);
+    tickTapeChart("control-tick-chart", payload.ticks || []);
+    marketStrip("control-agent-strip", [
+      ["Monitor", monitor.status || "stopped"],
+      ["Config", agent.config || ""],
+      ["Mode", agent.mode || ""],
+      ["Source", agent.market_source || ""],
+      ["Symbol", (agent.symbols || []).join(", ")],
+      ["Latest", latest.action || "none"],
+      ["Risk", latest.risk_status || ""],
+      ["Experiences", agent.experience_count || 0],
+    ]);
+    decisionCard("control-decision-card", latest);
+    table("control-open-positions", [
+      { label: "Symbol", value: "symbol" },
+      { label: "Side", value: "side" },
+      { label: "Lot", value: "volume" },
+      { label: "Entry", value: "entry_price" },
+      { label: "SL", value: "stop_loss" },
+      { label: "TP", value: "take_profit" },
+      { label: "Opened", value: "opened_at" },
+    ], agent.open_positions || [], "No open paper positions.");
+    table("control-history", [
+      { label: "Time", value: "timestamp" },
+      { label: "Symbol", value: "symbol" },
+      { label: "Action", value: "action" },
+      { label: "Confidence", value: "confidence" },
+      { label: "Risk", value: "risk_status" },
+      { label: "Execution", value: "execution" },
+      { label: "Reasons", value: (row) => (row.reasons || []).join(", ") },
+    ], agent.recent_decisions || [], "No decisions recorded yet.");
+    table("control-recent-closes", [
+      { label: "Closed", value: "closed_at" },
+      { label: "Symbol", value: "symbol" },
+      { label: "Side", value: "side" },
+      { label: "Reason", value: "exit_reason" },
+      { label: "Entry", value: "entry_price" },
+      { label: "Exit", value: "exit_price" },
+      { label: "R", value: "r_multiple", className: (row) => Number(row.r_multiple || 0) > 0 ? "positive" : Number(row.r_multiple || 0) < 0 ? "negative" : "" },
+    ], operations.recent_closes || [], "No closed paper positions yet.");
+    table("control-agent-events", [
+      { label: "Time", value: "timestamp" },
+      { label: "Iter", value: "iteration" },
+      { label: "Symbol", value: "symbol" },
+      { label: "Action/Reason", value: (row) => row.action || row.reason || "" },
+      { label: "Risk", value: "risk_status" },
+      { label: "Execution", value: "execution" },
+      { label: "Closed", value: "closed_positions" },
+    ], monitor.recent_events || [], "No monitor events yet.");
+    if (payload.chart) {
+      renderControlChart(payload.chart);
+    }
+  }
+
+  function renderControlChart(chart) {
+    if (!$("control-market-candles")) return;
+    const select = $("control-symbol-select");
+    const selected = (select && select.value) || (chart.symbols || [])[0] || "";
+    const count = ((chart.series || {})[selected] || []).length;
+    if ($("control-chart-source")) $("control-chart-source").textContent = chart.source || "";
+    if ($("control-selected-symbol")) $("control-selected-symbol").textContent = selected;
+    if ($("control-candle-count")) $("control-candle-count").textContent = count;
+    if ($("control-timeframe-label")) $("control-timeframe-label").textContent = chart.timeframe || "";
+    candlestickChart("control-market-candles", selected, (chart.series || {})[selected] || [], (chart.overlays || {})[selected] || {});
+  }
+
+  async function refreshControlChart() {
+    if (!$("control-market-candles")) return;
+    const timeframeSelect = $("control-timeframe-select");
+    const candleInput = $("control-candle-limit");
+    const timeframe = timeframeSelect ? timeframeSelect.value : "H1";
+    const candles = Math.max(20, Math.min(300, Number(candleInput && candleInput.value ? candleInput.value : 80)));
+    if (candleInput) candleInput.value = candles;
+    const chart = await fetch(`/api/market-chart?timeframe=${encodeURIComponent(timeframe)}&candles=${candles}`).then((res) => res.json());
+    renderControlChart(chart);
+  }
+
+  function connectControlStream() {
+    if (!$("control-root") || !window.EventSource) return;
+    const state = $("control-stream-state");
+    const setState = (label, klass) => {
+      if (!state) return;
+      state.textContent = label;
+      state.className = `control-pill ${klass || ""}`.trim();
+    };
+    const source = new EventSource("/events");
+    source.addEventListener("open", () => setState("sse live", "live"));
+    source.addEventListener("snapshot", (event) => {
+      setState("sse live", "live");
+      renderControl(JSON.parse(event.data));
+    });
+    source.addEventListener("update", (event) => {
+      setState("sse live", "live");
+      renderControl(JSON.parse(event.data));
+    });
+    source.addEventListener("error", () => setState("reconnecting", "error"));
   }
 
   async function refreshLivePanels() {
     try {
-      await Promise.all([refreshOperations(), refreshPnl(), refreshMarket()]);
+      await Promise.all([refreshOperations(), refreshPnl(), refreshAgent(), refreshMarket(), refreshLiveMarket(), refreshTickTape()]);
     } catch (error) {
       console.warn("live refresh failed", error);
     }
   }
 
   if ($("monitor-metrics") || $("pnl-metrics") || $("market-candles")) {
+    const candleInput = $("market-candle-limit");
+    if (candleInput) marketCandleLimit = Math.max(20, Math.min(300, Number(candleInput.value || 80)));
+    const timeframeSelect = $("market-timeframe-select");
+    if (timeframeSelect) marketTimeframe = timeframeSelect.value || "H1";
+    const tickTapeLimitSelect = $("tick-tape-limit");
+    if (tickTapeLimitSelect) {
+      tickTapeLimit = Number(tickTapeLimitSelect.value || 120);
+      tickTapeLimitSelect.addEventListener("change", refreshTickTape);
+    }
     if ($("market-symbol-select")) {
       $("market-symbol-select").addEventListener("change", refreshMarket);
     }
+    if (timeframeSelect) {
+      timeframeSelect.addEventListener("change", refreshMarket);
+    }
+    if (candleInput) {
+      candleInput.addEventListener("change", refreshMarket);
+    }
+    if ($("market-zoom-in")) {
+      $("market-zoom-in").addEventListener("click", () => {
+        marketCandleLimit = Math.max(20, marketCandleLimit - 20);
+        if (candleInput) candleInput.value = marketCandleLimit;
+        refreshMarket();
+      });
+    }
+    if ($("market-zoom-out")) {
+      $("market-zoom-out").addEventListener("click", () => {
+        marketCandleLimit = Math.min(300, marketCandleLimit + 20);
+        if (candleInput) candleInput.value = marketCandleLimit;
+        refreshMarket();
+      });
+    }
+    if ($("market-reset-view")) {
+      $("market-reset-view").addEventListener("click", () => {
+        marketCandleLimit = 80;
+        marketTimeframe = "H1";
+        if (candleInput) candleInput.value = marketCandleLimit;
+        if (timeframeSelect) timeframeSelect.value = marketTimeframe;
+        refreshMarket();
+      });
+    }
     refreshLivePanels();
     setInterval(refreshLivePanels, refreshMs);
+    if ($("live-market-metrics")) {
+      setInterval(refreshLiveMarket, 1000);
+    }
+  }
+  if ($("control-root")) {
+    const candleInput = $("control-candle-limit");
+    const timeframeSelect = $("control-timeframe-select");
+    if ($("control-symbol-select")) {
+      $("control-symbol-select").addEventListener("change", refreshControlChart);
+    }
+    if (timeframeSelect) {
+      timeframeSelect.addEventListener("change", refreshControlChart);
+    }
+    if (candleInput) {
+      candleInput.addEventListener("change", refreshControlChart);
+    }
+    if ($("control-zoom-in")) {
+      $("control-zoom-in").addEventListener("click", () => {
+        const current = Number(candleInput && candleInput.value ? candleInput.value : 80);
+        if (candleInput) candleInput.value = Math.max(20, current - 20);
+        refreshControlChart();
+      });
+    }
+    if ($("control-zoom-out")) {
+      $("control-zoom-out").addEventListener("click", () => {
+        const current = Number(candleInput && candleInput.value ? candleInput.value : 80);
+        if (candleInput) candleInput.value = Math.min(300, current + 20);
+        refreshControlChart();
+      });
+    }
+    if ($("control-reset-view")) {
+      $("control-reset-view").addEventListener("click", () => {
+        if (candleInput) candleInput.value = 80;
+        if (timeframeSelect) timeframeSelect.value = "H1";
+        refreshControlChart();
+      });
+    }
+    connectControlStream();
   }
 })();
 </script>
 """
+
+    def _events(self, request: BaseHTTPRequestHandler) -> None:
+        request.send_response(200)
+        request.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        request.send_header("Cache-Control", "no-cache")
+        request.send_header("Connection", "keep-alive")
+        request.end_headers()
+
+        def send(event_name: str, payload: dict[str, Any]) -> bool:
+            body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+            try:
+                request.wfile.write(f"event: {event_name}\n".encode("utf-8"))
+                request.wfile.write(b"data: ")
+                request.wfile.write(body)
+                request.wfile.write(b"\n\n")
+                request.wfile.flush()
+                return True
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                return False
+
+        last_sequence = self.event_sequence
+        if not send("snapshot", self._control_summary(include_chart=False)):
+            return
+
+        while True:
+            with self.event_condition:
+                self.event_condition.wait(timeout=20)
+                sequence = self.event_sequence
+            if sequence == last_sequence:
+                try:
+                    request.wfile.write(b": heartbeat\n\n")
+                    request.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    return
+                continue
+            last_sequence = sequence
+            if not send("update", self._control_summary(include_chart=False)):
+                return
 
     def _html(self, request: BaseHTTPRequestHandler, content: str) -> None:
         self._send(request, 200, content.encode("utf-8"), "text/html; charset=utf-8")
@@ -2196,11 +3784,15 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
         self._send(request, 404, b"Not found", "text/plain")
 
     def _send(self, request: BaseHTTPRequestHandler, status: int, body: bytes, content_type: str) -> None:
-        request.send_response(status)
-        request.send_header("Content-Type", content_type)
-        request.send_header("Content-Length", str(len(body)))
-        request.end_headers()
-        request.wfile.write(body)
+        try:
+            request.send_response(status)
+            request.send_header("Content-Type", content_type)
+            request.send_header("Content-Length", str(len(body)))
+            request.send_header("Connection", "close")
+            request.end_headers()
+            request.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return
 
     def _escape(self, value: Any) -> str:
         return html.escape(str(value), quote=True)
@@ -2208,6 +3800,10 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
 
 def serve(host: str = "127.0.0.1", port: int = 8787, root: str | Path = ".", monitor_fn: Any | None = None) -> None:
     app = WebApp(root, monitor_fn=monitor_fn)
+    app.start_tick_collector(interval_seconds=1.0)
     server = ThreadingHTTPServer((host, port), app.handler())
     print(f"Quantz web UI listening on http://{host}:{port}")
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    finally:
+        app.stop_tick_collector()
