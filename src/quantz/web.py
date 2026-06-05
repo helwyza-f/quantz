@@ -3833,6 +3833,12 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
     const openTracePanels = new Set(
       Array.from(root.querySelectorAll(".llm-trace details[open] summary")).map((node) => node.textContent || "")
     );
+    const traceScrolls = new Map(
+      Array.from(root.querySelectorAll(".llm-trace details summary")).map((node) => [
+        node.textContent || "",
+        node.parentElement ? (node.parentElement.querySelector("pre") || {}).scrollTop || 0 : 0,
+      ])
+    );
     clear(root);
     if (!decision || !decision.action) {
       const p = document.createElement("p");
@@ -3903,6 +3909,9 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
         pre.textContent = JSON.stringify(value, null, 2);
         details.append(summary, pre);
         trace.append(details);
+        requestAnimationFrame(() => {
+          pre.scrollTop = traceScrolls.get(summaryText) || 0;
+        });
       }
       card.append(trace);
     }
@@ -3917,6 +3926,14 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
         Array.from(item.querySelectorAll(".llm-trace details[open] summary")).map((node) =>
           `${item.dataset.decisionKey || ""}:${node.textContent || ""}`
         )
+      )
+    );
+    const traceScrolls = new Map(
+      Array.from(root.querySelectorAll(".decision-history-item")).flatMap((item) =>
+        Array.from(item.querySelectorAll(".llm-trace details summary")).map((node) => [
+          `${item.dataset.decisionKey || ""}:${node.textContent || ""}`,
+          node.parentElement ? (node.parentElement.querySelector("pre") || {}).scrollTop || 0 : 0,
+        ])
       )
     );
     clear(root);
@@ -3982,6 +3999,9 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
           pre.textContent = JSON.stringify(value, null, 2);
           details.append(summary, pre);
           trace.append(details);
+          requestAnimationFrame(() => {
+            pre.scrollTop = traceScrolls.get(`${decisionKey}:${summaryText}`) || 0;
+          });
         }
         item.append(trace);
       }
