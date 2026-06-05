@@ -157,6 +157,15 @@ The compose stack runs:
 
 Runtime settings are stored in SQLite at `data/quantz.db` inside the backend container. Use the Control page `Runtime Settings` panel to set the default agent config, symbol, decision cadence, max decisions, and OpenAI API key. Do not commit real API keys into `.env` or source files.
 
+For Docker-based live MT5 demo execution, run the MT5 order bridge on the Windows host before starting the agent:
+
+```bash
+export PYTHONPATH=src
+./.venv/Scripts/python scripts/mt5_bridge_server.py --host 0.0.0.0 --port 8765
+```
+
+`configs/mt5-demo-live.json` sends orders to `http://host.docker.internal:8765` from inside the backend container. EA socket ticks still post to `http://127.0.0.1:8787/bridge/tick`.
+
 If port `8787` is already used by the legacy Python web UI, run the FastAPI backend on another port and point Next.js to it:
 
 ```powershell

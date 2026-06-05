@@ -14,6 +14,7 @@ from urllib.parse import parse_qs, urlparse
 
 from quantz.agent import TradingAgent
 from quantz.analyst import LLMAnalyst, RuleBasedAnalyst
+from quantz.bridge import BridgeBrokerAdapter, BridgeClient
 from quantz.broker import Mt5BrokerAdapter, PaperBrokerAdapter
 from quantz.config import load_settings, merge_settings, settings_to_dict
 from quantz.dashboard import DashboardRenderer
@@ -1021,6 +1022,9 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
                     return mt5_summary
             except Exception:
                 pass
+        tick_summary = self._tick_market_chart_summary(live_settings, safe_timeframe, safe_candle_count)
+        if any(tick_summary.get("series", {}).values()):
+            return tick_summary
 
         settings = self._default_settings()
         state_path = self._rooted_path(getattr(settings, "sim_state_path", "data/sim-market-state.json"))
@@ -1059,6 +1063,97 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
             "series": series,
             "overlays": overlays,
         }
+
+    def _tick_market_chart_summary(self, settings: Any, timeframe_label: str, candle_count: int) -> dict[str, Any]:
+        symbols = list(getattr(settings, "symbols", [])) or ["XAUUSD"]
+        experiences = self._read_jsonl(self._rooted_path(getattr(settings, "memory_path", "data/experience.jsonl")))
+        series: dict[str, list[dict[str, Any]]] = {}
+        overlays: dict[str, dict[str, list[dict[str, Any]]]] = {}
+        for symbol in symbols:
+            candles = self._tick_candles(symbol, timeframe_label, candle_count)
+            series[symbol] = candles
+            overlays[symbol] = {
+                "indicators": self._market_indicators(candles),
+                "current_tick": self._latest_tick_for_symbol(symbol),
+                "signals": self._market_signals(experiences, symbol),
+                "open_positions": [],
+                "closed_positions": [],
+            }
+        return {
+            "source": "ea_socket_tick_history",
+            "status": "connected",
+            "config": getattr(settings, "memory_path", ""),
+            "timeframe": timeframe_label,
+            "candle_count": candle_count,
+            "state_path": "data/mt5-ticks.jsonl",
+            "symbols": symbols,
+            "series": series,
+            "overlays": overlays,
+        }
+
+    def _tick_candles(self, symbol: str, timeframe_label: str, candle_count: int) -> list[dict[str, Any]]:
+        wanted = str(symbol).upper()
+        ticks = [
+            tick
+            for tick in reversed(self._recent_ticks(limit=max(500, candle_count * 8)))
+            if str(tick.get("symbol", "")).upper() == wanted
+        ]
+        points = []
+        for tick in ticks:
+            timestamp = self._parse_datetime(tick.get("tick_time")) or self._parse_datetime(tick.get("captured_at"))
+            mid = float(tick.get("mid", 0.0) or 0.0)
+            if timestamp is not None and mid > 0:
+                points.append((timestamp, mid))
+        if not points:
+            return []
+        bucket_seconds = self._timeframe_seconds(timeframe_label)
+        buckets: dict[int, list[float]] = {}
+        for timestamp, mid in points:
+            key = int(timestamp.timestamp()) // bucket_seconds
+            buckets.setdefault(key, []).append(mid)
+        candles = []
+        for index, (bucket, values) in enumerate(sorted(buckets.items())[-candle_count:], start=1):
+            candle_time = datetime.fromtimestamp(bucket * bucket_seconds, timezone.utc).isoformat()
+            candles.append(
+                {
+                    "time": candle_time,
+                    "step": index,
+                    "open": round(values[0], 6),
+                    "high": round(max(values), 6),
+                    "low": round(min(values), 6),
+                    "close": round(values[-1], 6),
+                    "tick_volume": len(values),
+                }
+            )
+        if len(candles) == 1 and len(points) > 1:
+            candles = []
+            chunk_size = max(1, len(points) // min(candle_count, len(points)))
+            chunks = [points[i : i + chunk_size] for i in range(0, len(points), chunk_size)][-candle_count:]
+            for index, chunk in enumerate(chunks, start=1):
+                values = [mid for _timestamp, mid in chunk]
+                candles.append(
+                    {
+                        "time": chunk[-1][0].isoformat(),
+                        "step": index,
+                        "open": round(values[0], 6),
+                        "high": round(max(values), 6),
+                        "low": round(min(values), 6),
+                        "close": round(values[-1], 6),
+                        "tick_volume": len(values),
+                    }
+                )
+        return candles
+
+    def _timeframe_seconds(self, timeframe_label: str) -> int:
+        return {
+            "M1": 60,
+            "M5": 300,
+            "M15": 900,
+            "M30": 1800,
+            "H1": 3600,
+            "H4": 14400,
+            "D1": 86400,
+        }.get(str(timeframe_label).upper(), 60)
 
     def _mt5_market_chart_summary(self, config_name: str, settings: Any, timeframe_label: str, candle_count: int) -> dict[str, Any]:
         from datetime import datetime, timezone
@@ -2711,6 +2806,8 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
                 raise ValueError("live mode requires allow_live_execution=true in the selected config")
             if trigger_mode == "stream" and settings.market_source != "mt5":
                 raise ValueError("stream agent requires market_source: mt5 and EA socket ticks")
+            if trigger_mode == "stream" and settings.mode == "live" and settings.execution_source == "bridge":
+                BridgeClient(settings.bridge_url).get_json("/account")
             settings = merge_settings(
                 settings,
                 interval_seconds=interval_seconds,
@@ -2917,6 +3014,10 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
     def _stream_broker(self, settings: Any) -> Any:
         if settings.mode == "paper":
             return PaperBrokerAdapter()
+        if settings.mode == "live" and getattr(settings, "execution_source", "mt5") == "bridge":
+            if not bool(getattr(settings, "allow_live_execution", False)):
+                raise RuntimeError("live_execution_not_allowed")
+            return BridgeBrokerAdapter(BridgeClient(getattr(settings, "bridge_url", "http://host.docker.internal:8765")))
         if settings.mode == "live" and getattr(settings, "execution_source", "mt5") == "mt5":
             if not bool(getattr(settings, "allow_live_execution", False)):
                 raise RuntimeError("live_execution_not_allowed")
@@ -2957,14 +3058,15 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
                 },
             )
         except Exception:
+            derived = self._tick_market_features(symbol, bid, ask, spread_points)
             return MarketSnapshot(
                 symbol=symbol,
                 bid=bid,
                 ask=ask,
                 spread_points=round(spread_points, 2),
-                atr_points=max(spread_points * 4, 1),
-                trend_score=0.0,
-                volatility_score=0.5,
+                atr_points=derived["atr_points"],
+                trend_score=derived["trend_score"],
+                volatility_score=derived["volatility_score"],
                 session="ea_socket",
                 news_risk="low",
                 timestamp=timestamp,
@@ -2973,8 +3075,38 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
                     "tick_source": "ea_socket",
                     "tick_time": tick.get("tick_time", ""),
                     "captured_at": tick.get("captured_at", ""),
+                    "derived_from_tick_tape": True,
                 },
             )
+
+    def _tick_market_features(self, symbol: str, bid: float, ask: float, spread_points: float) -> dict[str, float]:
+        candles = self._tick_candles(symbol, "M1", 80)
+        closes = [float(candle.get("close", 0.0) or 0.0) for candle in candles]
+        if len(closes) < 4:
+            mid = (bid + ask) / 2
+            return {
+                "atr_points": max(spread_points * 4, 1),
+                "trend_score": 0.0 if mid <= 0 else 0.0,
+                "volatility_score": 0.5,
+            }
+        fast_window = closes[-5:] if len(closes) >= 5 else closes
+        slow_window = closes[-20:] if len(closes) >= 20 else closes
+        fast = sum(fast_window) / len(fast_window)
+        slow = sum(slow_window) / len(slow_window)
+        recent_range = max(slow_window) - min(slow_window)
+        trend = 0.0 if recent_range <= 0 else max(-1.0, min(1.0, (fast - slow) / recent_range * 2.5))
+        ranges = [
+            abs(float(candle.get("high", 0.0) or 0.0) - float(candle.get("low", 0.0) or 0.0))
+            for candle in candles[-15:]
+        ]
+        point = 0.001 if str(symbol).upper().startswith("XAU") else 0.00001
+        atr_points = max((sum(ranges) / len(ranges) / point) if ranges else spread_points * 4, spread_points * 2, 1)
+        volatility = max(0.0, min(1.0, (atr_points / 5000) * 0.8 + min(spread_points / max(atr_points, 1), 1.0) * 0.2))
+        return {
+            "atr_points": round(atr_points, 2),
+            "trend_score": round(trend, 4),
+            "volatility_score": round(volatility, 4),
+        }
 
     def _account_state_for_stream_agent(self, settings: Any) -> AccountState:
         try:
