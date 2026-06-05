@@ -3827,6 +3827,9 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
   function decisionCard(id, decision) {
     const root = $(id);
     if (!root) return;
+    const openTracePanels = new Set(
+      Array.from(root.querySelectorAll(".llm-trace details[open] summary")).map((node) => node.textContent || "")
+    );
     clear(root);
     if (!decision || !decision.action) {
       const p = document.createElement("p");
@@ -3890,6 +3893,7 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
         ["Response from LLM", decision.llm_trace.response || {}],
       ]) {
         const details = document.createElement("details");
+        details.open = openTracePanels.has(summaryText);
         const summary = document.createElement("summary");
         summary.textContent = summaryText;
         const pre = document.createElement("pre");
