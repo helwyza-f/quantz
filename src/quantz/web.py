@@ -1776,6 +1776,8 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
             return "<p>No decisions recorded yet. Start the agent with mt5-paper.json to collect decisions.</p>"
         reasons = decision.get("reasons", [])
         reason_items = "".join(f"<li>{self._escape(reason)}</li>" for reason in reasons) if reasons else "<li>none</li>"
+        risk_notes = decision.get("analyst_risk_notes", [])
+        risk_note_items = "".join(f"<li>{self._escape(note)}</li>" for note in risk_notes) if risk_notes else "<li>none</li>"
         return f"""
         <div class="decision-card">
           <div><span>Time</span><strong>{self._escape(decision.get("timestamp", ""))}</strong></div>
@@ -1784,7 +1786,12 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
           <div><span>Confidence</span><strong>{self._escape(decision.get("confidence", ""))}</strong></div>
           <div><span>Risk</span><strong>{self._escape(decision.get("risk_status", ""))}</strong></div>
           <div><span>Execution</span><strong>{self._escape(decision.get("execution", ""))}</strong></div>
+          <div><span>Brain</span><strong>{self._escape(decision.get("analyst_model", ""))}</strong></div>
+          <div><span>Bias</span><strong>{self._escape(decision.get("analyst_bias", ""))}</strong></div>
+          <div><span>Regime</span><strong>{self._escape(decision.get("analyst_regime", ""))}</strong></div>
+          <div><span>Avoid</span><strong>{self._escape(decision.get("analyst_avoid_trade", ""))}</strong></div>
           <div class="decision-reasons"><span>Reasons</span><ul>{reason_items}</ul></div>
+          <div class="decision-reasons"><span>Analyst Risk Notes</span><ul>{risk_note_items}</ul></div>
         </div>
         """
 
@@ -1973,11 +1980,12 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
                 f"<td>{self._escape(decision.get('action', ''))}</td>"
                 f"<td>{self._escape(decision.get('confidence', ''))}</td>"
                 f"<td>{self._escape(decision.get('risk_status', ''))}</td>"
+                f"<td>{self._escape(decision.get('analyst_model', ''))}</td>"
                 f"<td>{self._escape(decision.get('execution', ''))}</td>"
                 f"<td>{self._escape(', '.join(decision.get('reasons', [])))}</td>"
                 "</tr>"
             )
-        return "<table><thead><tr><th>Time</th><th>Symbol</th><th>Action</th><th>Confidence</th><th>Risk</th><th>Execution</th><th>Reasons</th></tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
+        return "<table><thead><tr><th>Time</th><th>Symbol</th><th>Action</th><th>Confidence</th><th>Risk</th><th>Brain</th><th>Execution</th><th>Reasons</th></tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
 
     def _closes_table(self, closes: list[dict[str, Any]]) -> str:
         if not closes:
@@ -2421,6 +2429,7 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
         decision = row.get("decision", {})
         risk = row.get("risk", {})
         execution = row.get("execution") or {}
+        analyst = (decision.get("metadata") or {}).get("analyst") or {}
         raw_timestamp = decision.get("timestamp") or row.get("timestamp", "")
         return {
             "timestamp": self._format_local_time(raw_timestamp),
@@ -2431,6 +2440,11 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
             "risk_status": risk.get("status", ""),
             "execution": execution.get("message") or execution.get("accepted", ""),
             "reasons": decision.get("reason_codes", []) or risk.get("reasons", []),
+            "analyst_model": analyst.get("model_version", ""),
+            "analyst_bias": analyst.get("bias", ""),
+            "analyst_regime": analyst.get("market_regime", ""),
+            "analyst_avoid_trade": analyst.get("avoid_trade", ""),
+            "analyst_risk_notes": analyst.get("risk_notes", []),
         }
 
     def _position_row(self, row: dict[str, Any]) -> dict[str, Any]:
@@ -3802,6 +3816,10 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
     addItem("Confidence", decision.confidence || "");
     addItem("Risk", decision.risk_status || "");
     addItem("Execution", decision.execution || "");
+    addItem("Brain", decision.analyst_model || "");
+    addItem("Bias", decision.analyst_bias || "");
+    addItem("Regime", decision.analyst_regime || "");
+    addItem("Avoid", decision.analyst_avoid_trade === undefined ? "" : String(decision.analyst_avoid_trade));
     const reasons = document.createElement("div");
     reasons.className = "decision-reasons";
     const span = document.createElement("span");
@@ -3814,6 +3832,18 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
     }
     reasons.append(span, ul);
     card.append(reasons);
+    const notes = document.createElement("div");
+    notes.className = "decision-reasons";
+    const notesSpan = document.createElement("span");
+    notesSpan.textContent = "Analyst Risk Notes";
+    const notesList = document.createElement("ul");
+    for (const note of decision.analyst_risk_notes || ["none"]) {
+      const li = document.createElement("li");
+      li.textContent = note;
+      notesList.append(li);
+    }
+    notes.append(notesSpan, notesList);
+    card.append(notes);
     root.append(card);
   }
 
@@ -3839,6 +3869,7 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
       { label: "Action", value: "action" },
       { label: "Confidence", value: "confidence" },
       { label: "Risk", value: "risk_status" },
+      { label: "Brain", value: "analyst_model" },
       { label: "Execution", value: "execution" },
       { label: "Reasons", value: (row) => (row.reasons || []).join(", ") },
     ], consoleState.recent_decisions, "No decisions recorded yet.");
@@ -4033,6 +4064,7 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
       { label: "Action", value: "action" },
       { label: "Confidence", value: "confidence" },
       { label: "Risk", value: "risk_status" },
+      { label: "Brain", value: "analyst_model" },
       { label: "Execution", value: "execution" },
       { label: "Reasons", value: (row) => (row.reasons || []).join(", ") },
     ], agent.recent_decisions || [], "No decisions recorded yet.");
