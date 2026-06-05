@@ -175,7 +175,7 @@ def test_web_agent_page_shows_control_and_console(tmp_path):
                     "reason_codes": ["spread_too_wide"],
                     "metadata": {
                         "analyst": {
-                            "model_version": "llm_analyst:gpt-5.1-mini",
+                            "model_version": "llm_analyst:gpt-5.4-mini",
                             "bias": "neutral",
                             "market_regime": "mixed",
                             "avoid_trade": True,
@@ -207,7 +207,7 @@ def test_web_agent_page_shows_control_and_console(tmp_path):
     assert payload["brain"] == "planner-only"
     assert payload["latest_decision"]["action"] == "hold"
     assert payload["latest_decision"]["risk_status"] == "rejected"
-    assert payload["latest_decision"]["analyst_model"] == "llm_analyst:gpt-5.1-mini"
+    assert payload["latest_decision"]["analyst_model"] == "llm_analyst:gpt-5.4-mini"
     assert payload["latest_decision"]["analyst_risk_notes"] == ["llm_api_key_missing"]
     assert "Analyst Risk Notes" in html
 
@@ -1045,7 +1045,7 @@ def test_web_stream_agent_can_use_explicit_live_mt5_config(tmp_path, monkeypatch
     assert result == {"status": "started"}
     assert FakeMt5Broker.placed
     assert console["mode"] == "live"
-    assert console["brain"] == "llm:gpt-5.1-mini"
+    assert console["brain"] == "llm:gpt-5.4-mini"
     assert console["latest_decision"]["risk_status"] == "approved"
 
 

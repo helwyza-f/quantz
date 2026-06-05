@@ -2867,7 +2867,7 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
             return RuleBasedAnalyst()
         if settings.analyst == "llm":
             return LLMAnalyst(
-                model=getattr(settings, "llm_model", "gpt-5.1-mini"),
+                model=getattr(settings, "llm_model", "gpt-5.4-mini"),
                 api_key_env=getattr(settings, "llm_api_key_env", "OPENAI_API_KEY"),
                 timeout_seconds=float(getattr(settings, "llm_timeout_seconds", 12.0) or 12.0),
             )

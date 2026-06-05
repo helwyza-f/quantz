@@ -112,7 +112,7 @@ class LLMAnalyst(Analyst):
 
     def __init__(
         self,
-        model: str = "gpt-5.1-mini",
+        model: str = "gpt-5.4-mini",
         api_key_env: str = "OPENAI_API_KEY",
         timeout_seconds: float = 12.0,
         request_fn: Callable[[dict[str, Any]], dict[str, Any]] | None = None,

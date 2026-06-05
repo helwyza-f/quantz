@@ -7,7 +7,7 @@
   "execution_source": "mt5",
   "interval_seconds": 60,
   "llm_api_key_env": "OPENAI_API_KEY",
-  "llm_model": "gpt-5.1-mini",
+  "llm_model": "gpt-5.4-mini",
   "llm_timeout_seconds": 12,
   "market_source": "mt5",
   "memory_path": "data/mt5-demo-live-experience.jsonl",
