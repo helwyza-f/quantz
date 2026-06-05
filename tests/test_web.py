@@ -814,6 +814,84 @@ def test_web_market_chart_overlays_latest_ea_socket_tick(tmp_path, monkeypatch):
     assert latest_candle["high"] == 105.2
 
 
+def test_web_stream_agent_runs_from_new_ea_socket_tick(tmp_path, monkeypatch):
+    configs = tmp_path / "configs"
+    configs.mkdir()
+    (configs / "mt5-paper.json").write_text(
+        json.dumps(
+            {
+                "symbols": ["XAUUSD"],
+                "market_source": "mt5",
+                "mode": "paper",
+                "analyst": "rule",
+                "memory_path": "data/mt5-paper-experience.jsonl",
+                "paper_state_path": "data/mt5-paper-state.json",
+                "paper_start_equity": 10000,
+                "min_confidence": 0.65,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class FakeConnection:
+        pass
+
+    class FakeMarketFeed:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def snapshot(self, symbol):
+            return MarketSnapshot(
+                symbol=symbol,
+                bid=100.0,
+                ask=100.1,
+                spread_points=10,
+                atr_points=120,
+                trend_score=0.8,
+                volatility_score=0.5,
+                session="test",
+                news_risk="low",
+                features={"source": "mt5", "rates_loaded": 64},
+            )
+
+    class FakeAccountFeed:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def state(self):
+            return AccountState(equity=10000, balance=10000, free_margin=10000, open_positions=0)
+
+    monkeypatch.setattr("quantz.web.Mt5Connection", FakeConnection)
+    monkeypatch.setattr("quantz.web.Mt5MarketFeed", FakeMarketFeed)
+    monkeypatch.setattr("quantz.web.Mt5AccountFeed", FakeAccountFeed)
+
+    app = WebApp(tmp_path)
+    result = app._start_monitor_from_form(
+        {
+            "config": ["mt5-paper.json"],
+            "max_iterations": ["1"],
+            "interval_seconds": ["0.1"],
+            "trigger_mode": ["stream"],
+        }
+    )
+    app._ingest_bridge_tick(
+        json.dumps({"symbol": "XAUUSD", "bid": 100.1, "ask": 100.2, "point": 0.01, "digits": 2, "tick_time": 1780650000})
+    )
+    app.monitor_thread.join(timeout=2)
+    summary = app._monitor_summary()
+    console = app._api("/api/agent-console")
+
+    assert result == {"status": "started"}
+    assert summary["status"] == "completed"
+    assert summary["trigger_mode"] == "stream"
+    assert summary["event_count"] == 1
+    assert summary["recent_events"][0]["trigger"] == "ea_socket_tick"
+    assert summary["recent_events"][0]["source"] == "ea_socket_stream"
+    assert console["latest_decision"]["action"] == "open_position"
+    assert console["latest_decision"]["risk_status"] == "approved"
+    assert console["open_position_count"] == 1
+
+
 def monitor_with_events(settings, iterations, quiet=False, stop_event=None, event_sink=None):
     for iteration in range(1, iterations + 1):
         if stop_event is not None and stop_event.is_set():

@@ -4,16 +4,25 @@ import html
 import json
 import threading
 from collections import deque
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from quantz.agent import TradingAgent
+from quantz.analyst import RuleBasedAnalyst
+from quantz.broker import PaperBrokerAdapter
 from quantz.config import load_settings, merge_settings, settings_to_dict
 from quantz.dashboard import DashboardRenderer
 from quantz.experiment import ExperimentRunner
 from quantz.market import Mt5AccountFeed, Mt5Connection, Mt5MarketFeed
+from quantz.memory import JsonlExperienceStore
+from quantz.models import AccountState, AgentContext, MarketSnapshot
+from quantz.paper import PaperPortfolio
+from quantz.planner import VariableDrivenPlanner
+from quantz.risk import RiskConfig, RiskGovernor
 
 LOCAL_TZ = timezone(timedelta(hours=7), "WIB")
 
@@ -47,6 +56,7 @@ class WebApp:
             "status": "stopped",
             "config": None,
             "max_iterations": 0,
+            "trigger_mode": "interval",
             "started_at": None,
             "stopped_at": None,
             "error": None,
@@ -1666,13 +1676,13 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
         latest = console.get("latest_decision", {})
         items = [
             ("Monitor", monitor.get("status", "stopped")),
+            ("Trigger", monitor.get("trigger_mode", "interval")),
             ("Config", console.get("config", "")),
             ("Mode", console.get("mode", "")),
-            ("Source", console.get("market_source", "")),
+            ("Market", console.get("market_source", "")),
             ("Symbol", ", ".join(console.get("symbols", []))),
             ("Latest", latest.get("action", "none")),
             ("Risk", latest.get("risk_status", "")),
-            ("Experiences", console.get("experience_count", 0)),
         ]
         return "".join(
             f'<span><small>{self._escape(label)}</small><strong>{self._escape(value)}</strong></span>'
@@ -1696,10 +1706,11 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
         )
         return f"""
         <form method="post" action="/agent/monitor/start">
+          <input type="hidden" name="trigger_mode" value="stream">
           <div class="market-toolbar">
             <label>Config<select name="config">{options}</select></label>
             <label>Iterations<input name="max_iterations" type="number" min="1" max="10000" value="100"></label>
-            <label>Interval<input name="interval_seconds" type="number" min="0.1" max="3600" step="0.1" value="1"></label>
+            <label>Decision gap<input name="interval_seconds" type="number" min="0.1" max="3600" step="0.1" value="1"></label>
             <button type="submit">Start Agent</button>
           </div>
         </form>
@@ -1745,6 +1756,7 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
         items = [
             ("Status", monitor.get("status", "stopped")),
             ("Running", monitor.get("running", False)),
+            ("Trigger", monitor.get("trigger_mode", "interval")),
             ("Config", monitor.get("config") or ""),
             ("Max Iterations", monitor.get("max_iterations", 0)),
             ("Events", monitor.get("event_count", 0)),
@@ -2451,7 +2463,8 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
             return {"error": str(exc)}
 
     def _start_monitor_from_form(self, form: dict[str, list[str]]) -> dict[str, Any]:
-        if self.monitor_fn is None:
+        trigger_mode = form.get("trigger_mode", ["interval"])[0]
+        if trigger_mode == "interval" and self.monitor_fn is None:
             return {"error": "Monitor runner is not configured for this web app instance."}
         self._refresh_monitor_state()
         with self.monitor_lock:
@@ -2465,9 +2478,13 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
                 raise ValueError("max_iterations must be between 1 and 10000")
             if interval_seconds < 0.1 or interval_seconds > 3600:
                 raise ValueError("interval_seconds must be between 0.1 and 3600")
+            if trigger_mode not in {"interval", "stream"}:
+                raise ValueError("trigger_mode must be interval or stream")
             settings = load_settings(str(self._safe_config_path(config_name)))
             if settings.mode == "live":
                 raise ValueError("web monitor start refuses live mode; use paper mode until live safeguards are explicit")
+            if trigger_mode == "stream" and settings.market_source != "mt5":
+                raise ValueError("stream agent requires market_source: mt5 and EA socket ticks")
             settings = merge_settings(
                 settings,
                 interval_seconds=interval_seconds,
@@ -2476,11 +2493,12 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
                 sim_state_path=str(self._rooted_path(settings.sim_state_path)),
             )
             stop_event = threading.Event()
+            target = self._stream_monitor_target if trigger_mode == "stream" else self._monitor_target
             thread = threading.Thread(
-                target=self._monitor_target,
+                target=target,
                 args=(settings, max_iterations, stop_event, config_name),
                 daemon=True,
-                name="quantz-web-monitor",
+                name="quantz-web-stream-agent" if trigger_mode == "stream" else "quantz-web-monitor",
             )
             with self.monitor_lock:
                 self.monitor_events = []
@@ -2491,6 +2509,7 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
                     "status": "running",
                     "config": config_name,
                     "max_iterations": max_iterations,
+                    "trigger_mode": trigger_mode,
                     "started_at": self._now(),
                     "stopped_at": None,
                     "error": None,
@@ -2525,6 +2544,178 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
             )
             self._write_monitor_snapshot_locked()
         self._notify_event_stream()
+
+    def _stream_monitor_target(self, settings: Any, max_iterations: int, stop_event: threading.Event, config_name: str) -> None:
+        error = None
+        processed_keys: set[tuple[str, str, str, str]] = set()
+        iteration = 0
+        last_decision_at: datetime | None = None
+        started_after = datetime.now(timezone.utc)
+        try:
+            while iteration < max_iterations:
+                if stop_event.is_set():
+                    break
+
+                tick = self._latest_stream_tick(settings.symbols, processed_keys, started_after)
+                if not tick:
+                    with self.event_condition:
+                        sequence = self.event_sequence
+                        self.event_condition.wait_for(
+                            lambda: stop_event.is_set() or self.event_sequence != sequence,
+                            timeout=30,
+                        )
+                    if stop_event.is_set():
+                        break
+                    tick = self._latest_stream_tick(settings.symbols, processed_keys, started_after)
+                if not tick:
+                    continue
+                now = datetime.now(timezone.utc)
+                if last_decision_at is not None:
+                    elapsed = (now - last_decision_at).total_seconds()
+                    if elapsed < float(settings.interval_seconds):
+                        continue
+
+                iteration += 1
+                last_decision_at = now
+                record = self._run_stream_agent_once(settings, tick)
+                closed = (record.outcome or {}).get("closed_positions", [])
+                self._record_monitor_event(
+                    {
+                        "timestamp": self._now(),
+                        "iteration": iteration,
+                        "trigger": "ea_socket_tick",
+                        "source": "ea_socket_stream",
+                        "symbol": record.decision.symbol,
+                        "action": record.decision.action,
+                        "confidence": record.decision.confidence,
+                        "risk_status": record.risk.status,
+                        "execution": record.execution.message if record.execution else None,
+                        "closed_positions": len(closed),
+                        "tick_bid": tick.get("bid", ""),
+                        "tick_ask": tick.get("ask", ""),
+                        "reason_codes": record.decision.reason_codes,
+                    }
+                )
+        except Exception as exc:
+            error = str(exc)
+        with self.monitor_lock:
+            self.monitor_state.update(
+                {
+                    "running": False,
+                    "status": "error" if error else "stopped" if stop_event.is_set() else "completed",
+                    "config": config_name,
+                    "trigger_mode": "stream",
+                    "stopped_at": self._now(),
+                    "error": error,
+                }
+            )
+            self._write_monitor_snapshot_locked()
+        self._notify_event_stream()
+
+    def _latest_stream_tick(
+        self,
+        symbols: list[str],
+        processed_keys: set[tuple[str, str, str, str]],
+        started_after: datetime,
+    ) -> dict[str, Any]:
+        wanted = {symbol.upper() for symbol in symbols}
+        for tick in self._recent_ticks(limit=50):
+            if str(tick.get("source", "")) != "ea_socket":
+                continue
+            if str(tick.get("symbol", "")).upper() not in wanted:
+                continue
+            captured_at = self._parse_datetime(tick.get("captured_at", ""))
+            if captured_at is not None and captured_at <= started_after:
+                continue
+            key = (
+                str(tick.get("symbol", "")),
+                str(tick.get("tick_time", "")),
+                str(tick.get("bid", "")),
+                str(tick.get("ask", "")),
+            )
+            if key in processed_keys:
+                continue
+            processed_keys.add(key)
+            return tick
+        return {}
+
+    def _run_stream_agent_once(self, settings: Any, tick: dict[str, Any]) -> Any:
+        symbol = str(tick.get("symbol", settings.symbols[0])).upper()
+        market = self._market_snapshot_from_stream_tick(settings, tick)
+        account = self._account_state_for_stream_agent(settings)
+        agent = TradingAgent(
+            planner=VariableDrivenPlanner(),
+            risk_governor=RiskGovernor(RiskConfig()),
+            broker=PaperBrokerAdapter(),
+            memory=JsonlExperienceStore(settings.memory_path),
+            paper_portfolio=PaperPortfolio(settings.paper_state_path),
+            analyst=RuleBasedAnalyst() if settings.analyst == "rule" else None,
+        )
+        return agent.run_once(
+            AgentContext(
+                market=market,
+                account=account,
+                constraints={
+                    **settings.constraints,
+                    "stream_source": "ea_socket",
+                    "stream_symbol": symbol,
+                },
+            )
+        )
+
+    def _market_snapshot_from_stream_tick(self, settings: Any, tick: dict[str, Any]) -> MarketSnapshot:
+        symbol = str(tick.get("symbol", settings.symbols[0])).upper()
+        bid = float(tick.get("bid", 0.0) or 0.0)
+        ask = float(tick.get("ask", 0.0) or 0.0)
+        spread_points = float(tick.get("spread_points", 0.0) or 0.0)
+        timestamp = self._parse_datetime(tick.get("tick_time")) or self._parse_datetime(tick.get("captured_at")) or datetime.now(timezone.utc)
+        try:
+            base = Mt5MarketFeed(Mt5Connection()).snapshot(symbol)
+            return replace(
+                base,
+                bid=bid,
+                ask=ask,
+                spread_points=round(spread_points, 2),
+                timestamp=timestamp,
+                features={
+                    **base.features,
+                    "source": "ea_socket_stream",
+                    "tick_source": "ea_socket",
+                    "tick_time": tick.get("tick_time", ""),
+                    "captured_at": tick.get("captured_at", ""),
+                },
+            )
+        except Exception:
+            return MarketSnapshot(
+                symbol=symbol,
+                bid=bid,
+                ask=ask,
+                spread_points=round(spread_points, 2),
+                atr_points=max(spread_points * 4, 1),
+                trend_score=0.0,
+                volatility_score=0.5,
+                session="ea_socket",
+                news_risk="low",
+                timestamp=timestamp,
+                features={
+                    "source": "ea_socket_stream",
+                    "tick_source": "ea_socket",
+                    "tick_time": tick.get("tick_time", ""),
+                    "captured_at": tick.get("captured_at", ""),
+                },
+            )
+
+    def _account_state_for_stream_agent(self, settings: Any) -> AccountState:
+        try:
+            return Mt5AccountFeed(Mt5Connection()).state()
+        except Exception:
+            equity = float(getattr(settings, "paper_start_equity", 10_000) or 10_000)
+            return AccountState(
+                equity=equity,
+                balance=equity,
+                free_margin=equity,
+                open_positions=0,
+            )
 
     def _record_monitor_event(self, event: dict[str, Any]) -> None:
         with self.monitor_lock:
@@ -3398,13 +3589,13 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
     const latest = consoleState.latest_decision || {};
     marketStrip("agent-status-strip", [
       ["Monitor", monitor.status || "stopped"],
+      ["Trigger", monitor.trigger_mode || "interval"],
       ["Config", consoleState.config || ""],
       ["Mode", consoleState.mode || ""],
-      ["Source", consoleState.market_source || ""],
+      ["Market", consoleState.market_source || ""],
       ["Symbol", (consoleState.symbols || []).join(", ")],
       ["Latest", latest.action || "none"],
       ["Risk", latest.risk_status || ""],
-      ["Experiences", consoleState.experience_count || 0],
     ]);
     decisionCard("agent-decision-card", latest);
     table("agent-decisions-table", [
@@ -3559,13 +3750,13 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
     updateControlChartFromTick(tick);
     marketStrip("control-agent-strip", [
       ["Monitor", monitor.status || "stopped"],
+      ["Trigger", monitor.trigger_mode || "interval"],
       ["Config", agent.config || ""],
       ["Mode", agent.mode || ""],
-      ["Source", agent.market_source || ""],
+      ["Market", agent.market_source || ""],
       ["Symbol", (agent.symbols || []).join(", ")],
       ["Latest", latest.action || "none"],
       ["Risk", latest.risk_status || ""],
-      ["Experiences", agent.experience_count || 0],
     ]);
     decisionCard("control-decision-card", latest);
     table("control-open-positions", [
