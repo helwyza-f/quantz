@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from abc import ABC, abstractmethod
 
 from quantz.models import ExecutionResult, OrderRequest
@@ -64,7 +65,7 @@ class Mt5BrokerAdapter(BrokerAdapter):
             "tp": order.take_profit,
             "deviation": 20,
             "magic": 20260605,
-            "comment": order.comment,
+            "comment": self._comment(order.comment),
             "type_time": mt5.ORDER_TIME_GTC,
             "type_filling": mt5.ORDER_FILLING_IOC,
         }
@@ -81,3 +82,7 @@ class Mt5BrokerAdapter(BrokerAdapter):
             filled_price=getattr(result, "price", None),
             raw=result._asdict() if hasattr(result, "_asdict") else {"retcode": retcode},
         )
+
+    def _comment(self, value: str) -> str:
+        cleaned = re.sub(r"[^A-Za-z0-9 _-]", "", value or "")
+        return (cleaned[:20] or "QZ").strip() or "QZ"

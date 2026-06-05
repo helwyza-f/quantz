@@ -9,6 +9,15 @@ from quantz.planner import VariableDrivenPlanner
 from quantz.risk import RiskConfig, RiskGovernor
 
 
+class CaptureBroker(PaperBrokerAdapter):
+    def __init__(self):
+        self.orders = []
+
+    def place_order(self, order):
+        self.orders.append(order)
+        return super().place_order(order)
+
+
 def test_agent_can_place_paper_trade(tmp_path):
     context = AgentContext(
         market=DemoMarketFeed().snapshot("XAUUSD"),
@@ -29,6 +38,29 @@ def test_agent_can_place_paper_trade(tmp_path):
     assert record.execution is not None
     assert record.execution.accepted is True
     assert (tmp_path / "experience.jsonl").exists()
+
+
+def test_agent_uses_mt5_safe_order_comment(tmp_path):
+    broker = CaptureBroker()
+    context = AgentContext(
+        market=DemoMarketFeed().snapshot("XAUUSD"),
+        account=DemoAccountFeed().state(),
+        constraints={"default_risk_percent": 0.25, "min_confidence": 0.65},
+    )
+    agent = TradingAgent(
+        planner=VariableDrivenPlanner(),
+        risk_governor=RiskGovernor(),
+        broker=broker,
+        memory=JsonlExperienceStore(tmp_path / "experience.jsonl"),
+    )
+
+    agent.run_once(context)
+
+    assert broker.orders
+    assert broker.orders[0].comment.startswith("QZ")
+    assert len(broker.orders[0].comment) <= 20
+    assert ":" not in broker.orders[0].comment
+    assert "_" not in broker.orders[0].comment
 
 
 def test_risk_governor_rejects_wide_spread(tmp_path):

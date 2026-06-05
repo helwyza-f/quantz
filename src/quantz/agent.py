@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import replace
 
 from quantz.analyst import Analyst
@@ -59,7 +60,7 @@ class TradingAgent:
                 entry_price=decision.entry_price,
                 stop_loss=decision.stop_loss,
                 take_profit=decision.take_profit,
-                comment=f"quantz:{decision.model_version}:{decision.decision_id[:8]}",
+                comment=safe_order_comment(decision.decision_id),
             )
             execution = self.broker.place_order(order)
             if execution.accepted and self.paper_portfolio:
@@ -74,3 +75,9 @@ class TradingAgent:
         record = ExperienceRecord(context=context, decision=decision, risk=risk, execution=execution, outcome=outcome)
         self.memory.append(record)
         return record
+
+
+def safe_order_comment(decision_id: str) -> str:
+    """MT5/broker-safe short ASCII comment."""
+    suffix = re.sub(r"[^A-Za-z0-9]", "", decision_id)[:10]
+    return f"QZ{suffix}"[:20] or "QZ"
