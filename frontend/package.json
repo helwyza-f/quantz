@@ -1,0 +1,26 @@
+{
+  "name": "@quantz/frontend",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "next dev --hostname 127.0.0.1 --port 3000",
+    "build": "next build",
+    "start": "next start --hostname 127.0.0.1 --port 3000",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "@tanstack/react-query": "5.101.0",
+    "lightweight-charts": "5.2.0",
+    "next": "16.2.7",
+    "react": "19.2.7",
+    "react-dom": "19.2.7"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "eslint": "^9.39.1",
+    "eslint-config-next": "16.2.7",
+    "typescript": "^5.9.3"
+  }
+}

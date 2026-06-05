@@ -118,6 +118,52 @@ PYTHONPATH=src python3 -m quantz.cli web --host 127.0.0.1 --port 8787 --root .
 
 Open `http://127.0.0.1:8787`.
 
+## Monorepo Web App
+
+Quantz also ships a split web stack:
+
+- backend: FastAPI served by Uvicorn on `http://127.0.0.1:8787`
+- frontend: Next.js App Router on `http://127.0.0.1:3000`
+
+Install dependencies:
+
+```powershell
+npm.cmd install
+.\.venv\Scripts\python -m pip install -e .
+```
+
+Run both services:
+
+```powershell
+npm.cmd run dev
+```
+
+Open `http://127.0.0.1:3000/control`.
+
+If port `8787` is already used by the legacy Python web UI, run the FastAPI backend on another port and point Next.js to it:
+
+```powershell
+$env:PYTHONPATH="src"
+$env:QUANTZ_ROOT=(Get-Location).Path
+.\.venv\Scripts\python -m uvicorn quantz.api.app:app --host 127.0.0.1 --port 8790
+```
+
+In another terminal:
+
+```powershell
+$env:NEXT_PUBLIC_API_BASE="http://127.0.0.1:8790"
+npm.cmd --prefix frontend run dev
+```
+
+The FastAPI backend keeps the current Quantz runtime contracts:
+
+- `GET /api/control`
+- `GET /api/market-chart`
+- `GET /events`
+- `POST /api/agent/start`
+- `POST /api/agent/stop`
+- `POST /bridge/tick`
+
 From the web UI you can:
 
 - edit `configs/*.json`

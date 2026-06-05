@@ -1,0 +1,18 @@
+{
+  "name": "quantz-monorepo",
+  "private": true,
+  "workspaces": [
+    "frontend"
+  ],
+  "scripts": {
+    "dev": "concurrently -k -n backend,frontend -c blue,green \"npm:backend:dev\" \"npm:frontend:dev\"",
+    "backend:dev": "powershell -ExecutionPolicy Bypass -File scripts/dev-backend.ps1",
+    "frontend:dev": "npm.cmd --prefix frontend run dev",
+    "frontend:build": "npm.cmd --prefix frontend run build",
+    "frontend:lint": "npm.cmd --prefix frontend run lint",
+    "test": ".\\.venv\\Scripts\\python -m pytest"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}
