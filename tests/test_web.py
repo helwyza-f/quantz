@@ -192,8 +192,10 @@ def test_web_agent_page_shows_control_and_console(tmp_path):
 
     assert "Agent Control" in html
     assert "Decision Console" in html
-    assert "Start Agent" in html
+    assert "Start Session" in html
+    assert 'name="next" value="/agent"' in html
     assert payload["config"] == "mt5-paper.json"
+    assert payload["brain"] == "planner-only"
     assert payload["latest_decision"]["action"] == "hold"
     assert payload["latest_decision"]["risk_status"] == "rejected"
 
@@ -261,6 +263,7 @@ def test_web_control_page_unifies_market_agent_and_sse(tmp_path):
     assert "Market Control" in html
     assert "control-market-candles" in html
     assert "new EventSource(\"/events\")" in html
+    assert 'name="next" value="/control"' in html
     assert payload["stream"]["transport"] == "sse"
     assert payload["stream"]["browser_polling"] is False
     assert payload["live"]["latest_tick"]["symbol"] == "XAUUSD"

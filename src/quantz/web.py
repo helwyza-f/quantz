@@ -153,14 +153,16 @@ class WebApp:
             return
         if parsed.path == "/agent/monitor/start":
             result = self._start_monitor_from_form(form)
+            next_path = self._safe_redirect_path(form.get("next", ["/agent"])[0])
             if "error" in result:
-                self._html(request, self._layout("Agent Error", f"<section><h2>Error</h2><pre>{self._escape(result['error'])}</pre><a class=\"button secondary\" href=\"/agent\">Back</a></section>"))
+                self._html(request, self._layout("Agent Error", f"<section><h2>Error</h2><pre>{self._escape(result['error'])}</pre><a class=\"button secondary\" href=\"{self._escape(next_path)}\">Back</a></section>"))
                 return
-            self._redirect(request, "/agent")
+            self._redirect(request, next_path)
             return
         if parsed.path == "/agent/monitor/stop":
+            next_path = self._safe_redirect_path(form.get("next", ["/agent"])[0])
             self._stop_monitor()
-            self._redirect(request, "/agent")
+            self._redirect(request, next_path)
             return
         self._not_found(request)
 
@@ -389,6 +391,11 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
             """,
         )
 
+    def _safe_redirect_path(self, value: str) -> str:
+        if not value.startswith("/") or value.startswith("//"):
+            return "/agent"
+        return value
+
     def _control_page(self) -> str:
         summary = self._control_summary(include_chart=True)
         chart = summary.get("chart", {})
@@ -434,7 +441,7 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
                   <div class="control-panel">
                     <h2>Agent</h2>
                     <div id="control-agent-strip" class="market-strip compact-strip">{self._agent_status_strip(agent)}</div>
-                    <div id="control-agent-controls">{self._agent_controls(agent.get("monitor", {}))}</div>
+                    <div id="control-agent-controls">{self._agent_controls(agent.get("monitor", {}), "/control")}</div>
                   </div>
                   <div class="control-panel">
                     <h2>Reasoning</h2>
@@ -477,7 +484,7 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
             <section>
               <h2>Agent Control</h2>
               <div id="agent-status-strip" class="market-strip">{self._agent_status_strip(console)}</div>
-              <div id="agent-controls">{self._agent_controls(monitor)}</div>
+              <div id="agent-controls">{self._agent_controls(monitor, "/agent")}</div>
             </section>
             <section>
               <h2>Decision Console</h2>
@@ -742,6 +749,7 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
         return {
             "mode": getattr(settings, "mode", "paper"),
             "market_source": getattr(settings, "market_source", "demo"),
+            "brain": self._agent_brain_label(settings),
             "symbols": getattr(settings, "symbols", []),
             "memory_path": str(memory_path.relative_to(self.root) if memory_path.is_relative_to(self.root) else memory_path),
             "paper_state_path": str(paper_state_path.relative_to(self.root) if paper_state_path.is_relative_to(self.root) else paper_state_path),
@@ -781,6 +789,7 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
             "config": config_name,
             "mode": getattr(settings, "mode", "paper"),
             "market_source": getattr(settings, "market_source", "demo"),
+            "brain": self._agent_brain_label(settings),
             "symbols": getattr(settings, "symbols", []),
             "memory_path": str(memory_path.relative_to(self.root) if memory_path.is_relative_to(self.root) else memory_path),
             "paper_state_path": str(paper_state_path.relative_to(self.root) if paper_state_path.is_relative_to(self.root) else paper_state_path),
@@ -1682,6 +1691,7 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
         items = [
             ("Mode", operations.get("mode", "paper")),
             ("Market Source", operations.get("market_source", "demo")),
+            ("Brain", operations.get("brain", "")),
             ("Symbols", ", ".join(operations.get("symbols", []))),
             ("Experiences", operations.get("experience_count", 0)),
             ("Open Positions", operations.get("open_position_count", 0)),
@@ -1706,6 +1716,7 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
             ("Trigger", monitor.get("trigger_mode", "interval")),
             ("Config", console.get("config", "")),
             ("Mode", console.get("mode", "")),
+            ("Brain", console.get("brain", "")),
             ("Market", console.get("market_source", "")),
             ("Symbol", ", ".join(console.get("symbols", []))),
             ("MT5 Open", console.get("mt5_open_position_count", 0)),
@@ -1717,11 +1728,13 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
             for label, value in items
         )
 
-    def _agent_controls(self, monitor: dict[str, Any]) -> str:
+    def _agent_controls(self, monitor: dict[str, Any], return_to: str = "/agent") -> str:
+        safe_return_to = self._safe_redirect_path(return_to)
         if monitor.get("running"):
-            return """
+            return f"""
             <form method="post" action="/agent/monitor/stop">
-              <div class="actions"><button type="submit">Stop Agent</button></div>
+              <input type="hidden" name="next" value="{self._escape(safe_return_to)}">
+              <div class="actions"><button type="submit">Stop Session</button></div>
             </form>
             """
         configs = self._agent_config_names()
@@ -1734,12 +1747,13 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
         )
         return f"""
         <form method="post" action="/agent/monitor/start">
+          <input type="hidden" name="next" value="{self._escape(safe_return_to)}">
           <input type="hidden" name="trigger_mode" value="stream">
           <div class="market-toolbar">
             <label>Config<select name="config">{options}</select></label>
-            <label>Iterations<input name="max_iterations" type="number" min="1" max="10000" value="100"></label>
+            <label>Max decisions<input name="max_iterations" type="number" min="1" max="10000" value="100"></label>
             <label>Decision gap<input name="interval_seconds" type="number" min="0.1" max="3600" step="0.1" value="1"></label>
-            <button type="submit">Start Agent</button>
+            <button type="submit">Start Session</button>
           </div>
         </form>
         """
@@ -2559,6 +2573,14 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
             if getattr(settings, "mode", "paper") == "paper":
                 names.append(name)
         return names
+
+    def _agent_brain_label(self, settings: Any) -> str:
+        analyst = getattr(settings, "analyst", "none")
+        if analyst == "rule":
+            return "rule-based"
+        if analyst == "none":
+            return "planner-only"
+        return str(analyst)
 
     def _experiment_names(self) -> list[str]:
         if not self.experiments_dir.exists():
@@ -3621,6 +3643,7 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
     metricGrid("operations-metrics", [
       ["Mode", operations.mode],
       ["Market Source", operations.market_source],
+      ["Brain", operations.brain || ""],
       ["Symbols", (operations.symbols || []).join(", ")],
       ["Experiences", operations.experience_count || 0],
       ["Open Positions", operations.open_position_count || 0],
@@ -3763,6 +3786,7 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
       ["Trigger", monitor.trigger_mode || "interval"],
       ["Config", consoleState.config || ""],
       ["Mode", consoleState.mode || ""],
+      ["Brain", consoleState.brain || ""],
       ["Market", consoleState.market_source || ""],
       ["Symbol", (consoleState.symbols || []).join(", ")],
       ["MT5 Open", consoleState.mt5_open_position_count || 0],
@@ -3936,6 +3960,7 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
       ["Trigger", monitor.trigger_mode || "interval"],
       ["Config", agent.config || ""],
       ["Mode", agent.mode || ""],
+      ["Brain", agent.brain || ""],
       ["Market", agent.market_source || ""],
       ["Symbol", (agent.symbols || []).join(", ")],
       ["MT5 Open", agent.mt5_open_position_count || 0],
