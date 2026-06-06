@@ -18,6 +18,15 @@ class CaptureBroker(PaperBrokerAdapter):
         return super().place_order(order)
 
 
+def test_experience_store_skips_corrupt_jsonl_rows(tmp_path):
+    path = tmp_path / "experience.jsonl"
+    path.write_text('not-json\n{"decision":{"symbol":"XAUUSD"}}\n[1,2,3]\n', encoding="utf-8")
+
+    rows = JsonlExperienceStore(path).read_raw()
+
+    assert rows == [{"decision": {"symbol": "XAUUSD"}}]
+
+
 def test_agent_can_place_paper_trade(tmp_path):
     context = AgentContext(
         market=DemoMarketFeed().snapshot("XAUUSD"),

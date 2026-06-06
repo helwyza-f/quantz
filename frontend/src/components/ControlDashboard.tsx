@@ -439,6 +439,7 @@ function DecisionCard({ decision }: { decision: Dict }) {
       ].map(([label, item]) => (
         <Metric key={String(label)} label={String(label)} value={value(item)} />
       ))}
+      <DecisionBrief brief={(decision.llm_brief || {}) as Dict} />
       <ReasonBlock title="Reasons" items={(decision.reasons || []) as string[]} />
       <ReasonBlock title="Risk Notes" items={(decision.analyst_risk_notes || []) as string[]} />
       <LlmTrace trace={(decision.llm_trace || {}) as Dict} />
@@ -465,10 +466,39 @@ function DecisionHistory({ rows }: { rows: Dict[] }) {
               <Metric key={String(label)} label={String(label)} value={value(item)} />
             ))}
           </div>
+          <DecisionBrief brief={(row.llm_brief || {}) as Dict} />
           <ReasonBlock title="Reasons" items={(row.reasons || []) as string[]} />
           <LlmTrace trace={(row.llm_trace || {}) as Dict} />
         </article>
       ))}
+    </div>
+  );
+}
+
+function DecisionBrief({ brief }: { brief: Dict }) {
+  if (!Object.keys(brief).length) return null;
+  const observations = (brief.key_observations || []) as string[];
+  const memoryNotes = (brief.memory_notes || []) as string[];
+  return (
+    <div className="decision-brief full">
+      <span>LLM Decision Brief</span>
+      {brief.decision_brief ? <strong>{value(brief.decision_brief)}</strong> : null}
+      <div className="brief-grid">
+        {brief.market_read ? <BriefItem label="Market read" value={brief.market_read} /> : null}
+        {brief.entry_plan ? <BriefItem label="Entry plan" value={brief.entry_plan} /> : null}
+        {brief.invalidation ? <BriefItem label="Invalidation" value={brief.invalidation} /> : null}
+      </div>
+      <ReasonBlock title="Key Observations" items={observations} />
+      <ReasonBlock title="Memory Notes" items={memoryNotes} />
+    </div>
+  );
+}
+
+function BriefItem({ label, value: item }: { label: string; value: unknown }) {
+  return (
+    <div>
+      <span>{label}</span>
+      <p>{value(item)}</p>
     </div>
   );
 }

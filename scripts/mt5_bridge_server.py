@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from math import fsum
 from urllib.parse import unquote, urlparse
@@ -76,8 +77,13 @@ def place_order(payload: dict) -> dict:
     ensure_mt5()
     symbol = str(payload["symbol"])
     side = str(payload["side"])
+    info = mt5.symbol_info(symbol)
+    if info is None:
+        raise RuntimeError(f"symbol_not_found:{symbol}")
+    if not info.visible and not mt5.symbol_select(symbol, True):
+        raise RuntimeError(f"symbol_select_failed:{symbol}")
     order_type = mt5.ORDER_TYPE_BUY if side == "buy" else mt5.ORDER_TYPE_SELL
-    request = {
+    base_request = {
         "action": mt5.TRADE_ACTION_DEAL,
         "symbol": symbol,
         "volume": float(payload["volume"]),
@@ -87,29 +93,87 @@ def place_order(payload: dict) -> dict:
         "tp": float(payload["take_profit"]),
         "deviation": 20,
         "magic": 20260605,
-        "comment": str(payload.get("comment", "quantz")),
+        "comment": safe_comment(str(payload.get("comment", "quantz"))),
         "type_time": mt5.ORDER_TIME_GTC,
-        "type_filling": mt5.ORDER_FILLING_IOC,
     }
-    result = mt5.order_send(request)
+    result = None
+    request = dict(base_request)
+    attempted_fillings = []
+    for filling in filling_candidates(info):
+        request = {**base_request, "type_filling": filling}
+        attempted_fillings.append(filling)
+        result = mt5.order_send(request)
+        if result is None:
+            return {
+                "accepted": False,
+                "broker_order_id": None,
+                "message": f"order_send_none:{mt5.last_error()}",
+                "filled_price": None,
+                "raw": request,
+            }
+        if getattr(result, "retcode", None) != getattr(mt5, "TRADE_RETCODE_INVALID_FILL", 10030):
+            break
     if result is None:
         return {
             "accepted": False,
             "broker_order_id": None,
-            "message": f"order_send_none:{mt5.last_error()}",
+            "message": "order_send_not_attempted",
             "filled_price": None,
             "raw": request,
         }
 
     raw = result._asdict() if hasattr(result, "_asdict") else {"retcode": getattr(result, "retcode", None)}
-    accepted = getattr(result, "retcode", None) == mt5.TRADE_RETCODE_DONE
+    raw["request"] = request
+    raw["attempted_fillings"] = attempted_fillings
+    retcode = getattr(result, "retcode", None)
+    accepted = retcode in {mt5.TRADE_RETCODE_DONE, getattr(mt5, "TRADE_RETCODE_DONE_PARTIAL", mt5.TRADE_RETCODE_DONE)}
     return {
         "accepted": accepted,
         "broker_order_id": str(getattr(result, "order", "")) if accepted else None,
-        "message": f"retcode:{getattr(result, 'retcode', None)}",
+        "message": f"retcode:{retcode}:{retcode_label(retcode)}",
         "filled_price": getattr(result, "price", None),
         "raw": raw,
     }
+
+
+def safe_comment(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9 _-]", "", value or "")
+    return (cleaned[:20] or "QZ").strip() or "QZ"
+
+
+def filling_candidates(info: object) -> list[int]:
+    mode = int(getattr(info, "filling_mode", 0) or 0)
+    flagged = [
+        (getattr(mt5, "SYMBOL_FILLING_FOK", 1), mt5.ORDER_FILLING_FOK),
+        (getattr(mt5, "SYMBOL_FILLING_IOC", 2), mt5.ORDER_FILLING_IOC),
+    ]
+    candidates = [order_filling for flag, order_filling in flagged if mode & int(flag)]
+    candidates.extend(
+        [
+            mt5.ORDER_FILLING_IOC,
+            mt5.ORDER_FILLING_FOK,
+            getattr(mt5, "ORDER_FILLING_RETURN", mt5.ORDER_FILLING_IOC),
+        ]
+    )
+    unique = []
+    for candidate in candidates:
+        if candidate not in unique:
+            unique.append(candidate)
+    return unique
+
+
+def retcode_label(retcode: object) -> str:
+    labels = {
+        getattr(mt5, "TRADE_RETCODE_DONE", 10009): "done",
+        getattr(mt5, "TRADE_RETCODE_DONE_PARTIAL", 10010): "done_partial",
+        getattr(mt5, "TRADE_RETCODE_INVALID_FILL", 10030): "invalid_filling_mode",
+        getattr(mt5, "TRADE_RETCODE_REQUOTE", 10004): "requote",
+        getattr(mt5, "TRADE_RETCODE_PRICE_CHANGED", 10020): "price_changed",
+        getattr(mt5, "TRADE_RETCODE_INVALID_STOPS", 10016): "invalid_stops",
+        getattr(mt5, "TRADE_RETCODE_NO_MONEY", 10019): "no_money",
+        getattr(mt5, "TRADE_RETCODE_MARKET_CLOSED", 10018): "market_closed",
+    }
+    return labels.get(retcode, "unknown")
 
 
 def atr_points(rates: list, point: float) -> float:

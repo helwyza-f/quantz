@@ -25,8 +25,14 @@ class JsonlExperienceStore:
         with self.path.open("r", encoding="utf-8") as handle:
             for line in handle:
                 stripped = line.strip()
-                if stripped:
-                    rows.append(json.loads(stripped))
+                if not stripped:
+                    continue
+                try:
+                    row = json.loads(stripped)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(row, dict):
+                    rows.append(row)
         return rows
 
     def _json_default(self, value: Any) -> Any:

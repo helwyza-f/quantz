@@ -67,7 +67,12 @@ def test_llm_analyst_reads_structured_response():
         return {
             "output_text": (
                 '{"market_regime":"trend","bias":"buy","confidence_adjustment":0.05,'
-                '"avoid_trade":false,"reason_codes":["llm_trend_confirmed"],"risk_notes":[]}'
+                '"avoid_trade":false,"reason_codes":["llm_trend_confirmed"],"risk_notes":[],'
+                '"decision_brief":"Trend confirmed with acceptable risk context.",'
+                '"market_read":"Buyer control is visible on the current snapshot.",'
+                '"entry_plan":"Only consider entry after risk governor approval.",'
+                '"invalidation":"Avoid if spread widens or trend reverses.",'
+                '"key_observations":["trend positive"],"memory_notes":["no recent conflict"]}'
             )
         }
 
@@ -84,6 +89,7 @@ def test_llm_analyst_reads_structured_response():
     assert analysis.metadata["llm_trace"]["request"]["model"] == captured_payload["model"]
     assert analysis.metadata["llm_trace"]["request"]["input"]["market"]["symbol"] == "XAUUSD"
     assert analysis.metadata["llm_trace"]["response"]["parsed"]["bias"] == "buy"
+    assert analysis.metadata["llm_trace"]["response"]["parsed"]["decision_brief"]
 
 
 def test_llm_analyst_reports_http_error_message():

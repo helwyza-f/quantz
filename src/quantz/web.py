@@ -621,6 +621,9 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
     .decision-card strong {{ display:block; margin-top:4px; font-size:15px; overflow-wrap:anywhere; }}
     .decision-reasons {{ grid-column:1 / -1; }}
     .decision-reasons ul {{ margin:8px 0 0; padding-left:18px; }}
+    .llm-brief {{ background:#f8fbfa; border-color:#cfe0d9 !important; }}
+    .llm-brief > span {{ color:var(--accent); font-size:11px; font-weight:800; text-transform:uppercase; }}
+    .llm-brief p {{ margin:8px 0 0; }}
     .llm-trace {{ grid-column:1 / -1; }}
     .llm-trace details {{ margin-top:8px; }}
     .llm-trace summary {{ cursor:pointer; color:var(--ink); font-weight:750; }}
@@ -1754,13 +1757,19 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
         with self.tick_tape_path.open("r", encoding="utf-8") as handle:
             for line in handle:
                 stripped = line.strip()
-                if stripped:
+                if not stripped:
+                    continue
+                try:
                     row = json.loads(stripped)
-                    row.setdefault("captured_at_display", self._format_local_time(row.get("captured_at", "")))
-                    row.setdefault("tick_time_display", self._format_local_time(row.get("tick_time", "")))
-                    row.setdefault("source", "unknown")
-                    row.setdefault("source_label", self._tick_source_label(row.get("source", "")))
-                    rows.append(row)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(row, dict):
+                    continue
+                row.setdefault("captured_at_display", self._format_local_time(row.get("captured_at", "")))
+                row.setdefault("tick_time_display", self._format_local_time(row.get("tick_time", "")))
+                row.setdefault("source", "unknown")
+                row.setdefault("source_label", self._tick_source_label(row.get("source", "")))
+                rows.append(row)
         return list(rows)[::-1]
 
     def _market_indicators(self, candles: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1886,6 +1895,7 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
         reason_items = "".join(f"<li>{self._escape(reason)}</li>" for reason in reasons) if reasons else "<li>none</li>"
         risk_notes = decision.get("analyst_risk_notes", [])
         risk_note_items = "".join(f"<li>{self._escape(note)}</li>" for note in risk_notes) if risk_notes else "<li>none</li>"
+        llm_brief = self._llm_brief_details(decision.get("llm_brief", {}))
         llm_trace = self._llm_trace_details(decision.get("llm_trace", {}))
         return f"""
         <div class="decision-card">
@@ -1899,9 +1909,27 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
           <div><span>Bias</span><strong>{self._escape(decision.get("analyst_bias", ""))}</strong></div>
           <div><span>Regime</span><strong>{self._escape(decision.get("analyst_regime", ""))}</strong></div>
           <div><span>Avoid</span><strong>{self._escape(decision.get("analyst_avoid_trade", ""))}</strong></div>
+          {llm_brief}
           <div class="decision-reasons"><span>Reasons</span><ul>{reason_items}</ul></div>
           <div class="decision-reasons"><span>Analyst Risk Notes</span><ul>{risk_note_items}</ul></div>
           {llm_trace}
+        </div>
+        """
+
+    def _llm_brief_details(self, brief: dict[str, Any]) -> str:
+        if not brief:
+            return ""
+        observations = "".join(f"<li>{self._escape(item)}</li>" for item in brief.get("key_observations", [])) or "<li>none</li>"
+        memory_notes = "".join(f"<li>{self._escape(item)}</li>" for item in brief.get("memory_notes", [])) or "<li>none</li>"
+        return f"""
+        <div class="decision-reasons llm-brief">
+          <span>LLM Decision Brief</span>
+          <strong>{self._escape(brief.get("decision_brief", ""))}</strong>
+          <p><b>Market read:</b> {self._escape(brief.get("market_read", ""))}</p>
+          <p><b>Entry plan:</b> {self._escape(brief.get("entry_plan", ""))}</p>
+          <p><b>Invalidation:</b> {self._escape(brief.get("invalidation", ""))}</p>
+          <p><b>Key observations</b></p><ul>{observations}</ul>
+          <p><b>Memory notes</b></p><ul>{memory_notes}</ul>
         </div>
         """
 
@@ -2107,6 +2135,7 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
             reasons = list(decision.get("reasons", []))
             reason_items = "".join(f"<li>{self._escape(reason)}</li>" for reason in reasons) if reasons else "<li>none</li>"
             execution = decision.get("execution") or "not sent"
+            llm_brief = self._llm_brief_details(decision.get("llm_brief", {}))
             llm_trace = self._llm_trace_details(decision.get("llm_trace", {}))
             decision_key = decision.get("decision_id") or decision.get("timestamp_raw") or decision.get("timestamp") or ""
             rows.append(
@@ -2120,6 +2149,7 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
                 f'<div><span>Brain</span><strong>{self._escape(decision.get("analyst_model", ""))}</strong></div>'
                 f'<div><span>Execution</span><strong>{self._escape(execution)}</strong></div>'
                 "</div>"
+                f"{llm_brief}"
                 f'<div class="decision-history-reasons"><span>Reasons</span><ul>{reason_items}</ul></div>'
                 f"{llm_trace}"
                 "</article>"
@@ -2569,6 +2599,7 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
         risk = row.get("risk", {})
         execution = row.get("execution") or {}
         analyst = (decision.get("metadata") or {}).get("analyst") or {}
+        llm_trace = (analyst.get("metadata") or {}).get("llm_trace", {})
         raw_timestamp = decision.get("timestamp") or row.get("timestamp", "")
         return {
             "decision_id": decision.get("decision_id", ""),
@@ -2585,7 +2616,21 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
             "analyst_regime": analyst.get("market_regime", ""),
             "analyst_avoid_trade": analyst.get("avoid_trade", ""),
             "analyst_risk_notes": analyst.get("risk_notes", []),
-            "llm_trace": (analyst.get("metadata") or {}).get("llm_trace", {}),
+            "llm_brief": self._llm_brief_from_trace(llm_trace),
+            "llm_trace": llm_trace,
+        }
+
+    def _llm_brief_from_trace(self, trace: dict[str, Any]) -> dict[str, Any]:
+        parsed = ((trace.get("response") or {}).get("parsed") or {}) if trace else {}
+        if not parsed:
+            return {}
+        return {
+            "decision_brief": parsed.get("decision_brief", ""),
+            "market_read": parsed.get("market_read", ""),
+            "entry_plan": parsed.get("entry_plan", ""),
+            "invalidation": parsed.get("invalidation", ""),
+            "key_observations": list(parsed.get("key_observations", []) or [])[:6],
+            "memory_notes": list(parsed.get("memory_notes", []) or [])[:6],
         }
 
     def _position_row(self, row: dict[str, Any]) -> dict[str, Any]:
@@ -2991,9 +3036,71 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
                     "external_open_positions_source": "mt5",
                     "block_when_symbol_open": True,
                     "open_symbol_positions": external_open_symbol_positions,
+                    "session_memory": self._stream_session_memory(settings, symbol, mt5_positions),
                 },
             )
         )
+
+    def _stream_session_memory(self, settings: Any, symbol: str, mt5_positions: list[dict[str, Any]]) -> dict[str, Any]:
+        ticks = [tick for tick in self._recent_ticks(limit=120) if str(tick.get("symbol", "")).upper() == symbol]
+        experiences = self._read_jsonl(self._rooted_path(getattr(settings, "memory_path", "data/experience.jsonl")))
+        recent_decisions = []
+        for row in experiences[-8:][::-1]:
+            decision = row.get("decision", {})
+            if str(decision.get("symbol", "")).upper() != symbol:
+                continue
+            analyst = (decision.get("metadata") or {}).get("analyst") or {}
+            trace = (analyst.get("metadata") or {}).get("llm_trace", {})
+            brief = self._llm_brief_from_trace(trace)
+            recent_decisions.append(
+                {
+                    "timestamp": decision.get("timestamp", ""),
+                    "action": decision.get("action", ""),
+                    "side": decision.get("side", ""),
+                    "confidence": decision.get("confidence", 0),
+                    "risk_status": row.get("risk", {}).get("status", ""),
+                    "execution": (row.get("execution") or {}).get("message") or (row.get("execution") or {}).get("accepted", ""),
+                    "top_reasons": list(decision.get("reason_codes", []) or [])[:6],
+                    "analyst_bias": analyst.get("bias", ""),
+                    "analyst_regime": analyst.get("market_regime", ""),
+                    "decision_brief": brief.get("decision_brief", ""),
+                }
+            )
+        return {
+            "purpose": "bounded working memory for the current autonomous session; use it to avoid fresh-chat decisions",
+            "symbol": symbol,
+            "recent_decisions_latest_first": recent_decisions[:8],
+            "tick_stream": {
+                "summary": self._tick_tape_summary(ticks),
+                "latest_samples": [
+                    {
+                        "captured_at": tick.get("captured_at", ""),
+                        "tick_time": tick.get("tick_time", ""),
+                        "bid": tick.get("bid", ""),
+                        "ask": tick.get("ask", ""),
+                        "spread_points": tick.get("spread_points", ""),
+                    }
+                    for tick in ticks[:20]
+                ],
+            },
+            "open_positions": [
+                {
+                    "symbol": position.get("symbol", ""),
+                    "side": position.get("side", position.get("type", "")),
+                    "volume": position.get("volume", ""),
+                    "entry_price": position.get("entry_price", position.get("price_open", "")),
+                    "profit": position.get("profit", ""),
+                    "stop_loss": position.get("stop_loss", position.get("sl", "")),
+                    "take_profit": position.get("take_profit", position.get("tp", "")),
+                }
+                for position in mt5_positions
+                if str(position.get("symbol", "")).upper() == symbol
+            ],
+            "decision_instruction": (
+                "Compare current market to recent decisions. If repeating hold, explain what has not changed. "
+                "If changing action, explain the concrete context change and position impact."
+            ),
+        }
 
     def _risk_config_from_settings(self, settings: Any) -> RiskConfig:
         return RiskConfig(
@@ -3216,8 +3323,14 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
         with path.open("r", encoding="utf-8") as handle:
             for line in handle:
                 stripped = line.strip()
-                if stripped:
-                    rows.append(json.loads(stripped))
+                if not stripped:
+                    continue
+                try:
+                    row = json.loads(stripped)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(row, dict):
+                    rows.append(row)
         return rows
 
     def _default_settings(self) -> Any:
@@ -4039,6 +4152,7 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
     }
     notes.append(notesSpan, notesList);
     card.append(notes);
+    appendLlmBrief(card, decision.llm_brief || {});
     if (decision.llm_trace && Object.keys(decision.llm_trace).length) {
       const trace = document.createElement("div");
       trace.className = "llm-trace";
@@ -4064,6 +4178,46 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
       card.append(trace);
     }
     root.append(card);
+  }
+
+  function appendLlmBrief(root, brief) {
+    if (!brief || !Object.keys(brief).length) return;
+    const section = document.createElement("div");
+    section.className = "decision-reasons llm-brief";
+    const title = document.createElement("span");
+    title.textContent = "LLM Decision Brief";
+    const summary = document.createElement("strong");
+    summary.textContent = brief.decision_brief || "";
+    section.append(title, summary);
+    for (const [label, text] of [
+      ["Market read", brief.market_read || ""],
+      ["Entry plan", brief.entry_plan || ""],
+      ["Invalidation", brief.invalidation || ""],
+    ]) {
+      if (!text) continue;
+      const paragraph = document.createElement("p");
+      const bold = document.createElement("b");
+      bold.textContent = `${label}: `;
+      paragraph.append(bold, document.createTextNode(text));
+      section.append(paragraph);
+    }
+    for (const [label, items] of [
+      ["Key observations", brief.key_observations || []],
+      ["Memory notes", brief.memory_notes || []],
+    ]) {
+      const paragraph = document.createElement("p");
+      const bold = document.createElement("b");
+      bold.textContent = label;
+      paragraph.append(bold);
+      const list = document.createElement("ul");
+      for (const item of items.length ? items : ["none"]) {
+        const li = document.createElement("li");
+        li.textContent = item;
+        list.append(li);
+      }
+      section.append(paragraph, list);
+    }
+    root.append(section);
   }
 
   function decisionHistory(id, rows) {
@@ -4128,7 +4282,9 @@ PYTHONPATH=src .venv/bin/python -m quantz.cli dashboard --experiment-dir data/ex
         ul.append(li);
       }
       reasons.append(label, ul);
-      item.append(head, reasons);
+      item.append(head);
+      appendLlmBrief(item, row.llm_brief || {});
+      item.append(reasons);
       if (row.llm_trace && Object.keys(row.llm_trace).length) {
         const trace = document.createElement("div");
         trace.className = "llm-trace";

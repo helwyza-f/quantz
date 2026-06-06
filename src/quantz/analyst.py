@@ -106,8 +106,35 @@ class LLMAnalyst(Analyst):
                 "items": {"type": "string", "maxLength": 96},
                 "maxItems": 8,
             },
+            "decision_brief": {"type": "string", "maxLength": 700},
+            "market_read": {"type": "string", "maxLength": 500},
+            "entry_plan": {"type": "string", "maxLength": 500},
+            "invalidation": {"type": "string", "maxLength": 400},
+            "key_observations": {
+                "type": "array",
+                "items": {"type": "string", "maxLength": 180},
+                "maxItems": 6,
+            },
+            "memory_notes": {
+                "type": "array",
+                "items": {"type": "string", "maxLength": 180},
+                "maxItems": 6,
+            },
         },
-        "required": ["market_regime", "bias", "confidence_adjustment", "avoid_trade", "reason_codes", "risk_notes"],
+        "required": [
+            "market_regime",
+            "bias",
+            "confidence_adjustment",
+            "avoid_trade",
+            "reason_codes",
+            "risk_notes",
+            "decision_brief",
+            "market_read",
+            "entry_plan",
+            "invalidation",
+            "key_observations",
+            "memory_notes",
+        ],
     }
 
     def __init__(
@@ -154,9 +181,12 @@ class LLMAnalyst(Analyst):
         return {
             "model": self.model,
             "instructions": (
-                "You are Quantz analyst. Read the structured market, account, and risk context. "
-                "Return only the schema fields. Do not place trades. If market quality, spread, "
-                "position state, or data quality is unsafe, set avoid_trade true."
+                "You are Quantz analyst. Read the structured market, account, risk context, "
+                "recent decision memory, tick stream summary, and open positions. Return only "
+                "the schema fields. Do not expose chain-of-thought and do not place trades. "
+                "Provide concise audit-ready rationale in decision_brief, market_read, "
+                "entry_plan, invalidation, key_observations, and memory_notes. If market "
+                "quality, spread, position state, or data quality is unsafe, set avoid_trade true."
             ),
             "input": json.dumps(
                 {
@@ -200,7 +230,7 @@ class LLMAnalyst(Analyst):
                     "schema": self.schema,
                 }
             },
-            "max_output_tokens": 600,
+            "max_output_tokens": 1200,
         }
 
     def _request_openai_response(self, payload: dict[str, Any]) -> dict[str, Any]:

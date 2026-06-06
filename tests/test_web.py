@@ -187,7 +187,15 @@ def test_web_agent_page_shows_control_and_console(tmp_path):
                                         "input": {"market": {"symbol": "XAUUSD"}},
                                     },
                                     "response": {
-                                        "parsed": {"avoid_trade": True},
+                                        "parsed": {
+                                            "avoid_trade": True,
+                                            "decision_brief": "Hold because market quality is weak.",
+                                            "market_read": "Mixed context.",
+                                            "entry_plan": "Wait for confirmation.",
+                                            "invalidation": "Reassess when spread normalizes.",
+                                            "key_observations": ["spread elevated"],
+                                            "memory_notes": ["previous decision was hold"],
+                                        },
                                     },
                                 }
                             },
@@ -220,6 +228,7 @@ def test_web_agent_page_shows_control_and_console(tmp_path):
     assert payload["latest_decision"]["risk_status"] == "rejected"
     assert payload["latest_decision"]["analyst_model"] == "llm_analyst:gpt-5.4-mini"
     assert payload["latest_decision"]["analyst_risk_notes"] == ["llm_api_key_missing"]
+    assert payload["latest_decision"]["llm_brief"]["decision_brief"] == "Hold because market quality is weak."
     assert payload["latest_decision"]["llm_trace"]["request"]["model"] == "gpt-5.4-mini"
     assert "Analyst Risk Notes" in html
     assert "LLM Trace" in html
@@ -858,6 +867,26 @@ def test_web_market_chart_overlays_latest_ea_socket_tick(tmp_path, monkeypatch):
     assert current_tick["bid"] == 105.1
     assert latest_candle["close"] == 105.2
     assert latest_candle["high"] == 105.2
+
+
+def test_web_skips_corrupt_tick_tape_lines(tmp_path):
+    app = WebApp(tmp_path)
+    app.tick_tape_path.parent.mkdir(parents=True, exist_ok=True)
+    app.tick_tape_path.write_text(
+        "\n".join(
+            [
+                "not-json",
+                json.dumps({"symbol": "XAUUSD", "bid": 101.1, "ask": 101.3, "captured_at": "2026-06-05T00:00:00+00:00"}),
+                "[1,2,3]",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    payload = app._api("/api/control")
+
+    assert payload["live"]["summary"]["count"] == 1
+    assert payload["live"]["latest_tick"]["symbol"] == "XAUUSD"
 
 
 def test_web_candlestick_chart_shows_latest_agent_decision(tmp_path):
