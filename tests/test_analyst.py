@@ -49,6 +49,29 @@ def test_rule_analyst_adjusts_confidence_for_strong_trend():
     assert "strong_trend" in adjusted.reason_codes
 
 
+def test_planner_applies_memory_weak_reason_penalty():
+    base = context(spread_points=10, trend_score=0.8)
+    plain = VariableDrivenPlanner().decide(base)
+    enriched = AgentContext(
+        base.market,
+        base.account,
+        {
+            **base.constraints,
+            "memory_context": {
+                "closed_trade_summary": {"count": 25, "average_r": -0.1},
+                "weak_reasons": [
+                    {"reason": "bullish_market_structure", "count": 20, "average_r": -0.2}
+                ],
+            },
+        },
+    )
+
+    adjusted = VariableDrivenPlanner().decide(enriched)
+
+    assert adjusted.confidence < plain.confidence
+    assert "memory_weak_reason_penalty" in adjusted.reason_codes
+
+
 def test_llm_analyst_fails_closed_without_api_key(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
@@ -90,6 +113,50 @@ def test_llm_analyst_reads_structured_response():
     assert analysis.metadata["llm_trace"]["request"]["input"]["market"]["symbol"] == "XAUUSD"
     assert analysis.metadata["llm_trace"]["response"]["parsed"]["bias"] == "buy"
     assert analysis.metadata["llm_trace"]["response"]["parsed"]["decision_brief"]
+
+
+def test_llm_analyst_payload_includes_experience_memory():
+    captured_payload = {}
+
+    def request_fn(payload):
+        captured_payload.update(payload)
+        return {
+            "output_text": (
+                '{"market_regime":"mixed","bias":"neutral","confidence_adjustment":-0.05,'
+                '"avoid_trade":true,"reason_codes":["memory_reason_quality_weak"],"risk_notes":[],'
+                '"decision_brief":"Recent memory is not strong enough.",'
+                '"market_read":"Current snapshot is mixed.",'
+                '"entry_plan":"Wait for cleaner setup.",'
+                '"invalidation":"Trade only after reason quality improves.",'
+                '"key_observations":["mixed setup"],"memory_notes":["recent average R is negative"]}'
+            )
+        }
+
+    base = context()
+    enriched = AgentContext(
+        base.market,
+        base.account,
+        {
+            **base.constraints,
+            "experience_memory": {
+                "symbol": "XAUUSD",
+                "sample_size": 12,
+                "closed_trade_summary": {"average_r": -0.3},
+            },
+            "memory_context": {
+                "symbol": "XAUUSD",
+                "sample_size": 12,
+                "closed_trade_summary": {"average_r": -0.3},
+                "lessons": ["recent average R is negative"],
+            },
+        },
+    )
+
+    LLMAnalyst(request_fn=request_fn).analyze(enriched)
+
+    request_input = captured_payload["input"]
+    assert "memory_context" in request_input
+    assert '"average_r": -0.3' in request_input
 
 
 def test_llm_analyst_reports_http_error_message():

@@ -182,11 +182,12 @@ class LLMAnalyst(Analyst):
             "model": self.model,
             "instructions": (
                 "You are Quantz analyst. Read the structured market, account, risk context, "
-                "recent decision memory, tick stream summary, and open positions. Return only "
+                "experience memory, recent decision quality, tick stream summary, and open positions. Return only "
                 "the schema fields. Do not expose chain-of-thought and do not place trades. "
                 "Provide concise audit-ready rationale in decision_brief, market_read, "
                 "entry_plan, invalidation, key_observations, and memory_notes. If market "
-                "quality, spread, position state, or data quality is unsafe, set avoid_trade true."
+                "quality, spread, position state, data quality, or the symbol's recent memory "
+                "shows weak reason quality, set avoid_trade true or reduce confidence."
             ),
             "input": json.dumps(
                 {
@@ -218,6 +219,8 @@ class LLMAnalyst(Analyst):
                         for key, value in context.constraints.items()
                         if key not in {"analyst"} and isinstance(value, (str, int, float, bool, list, dict, type(None)))
                     },
+                    "memory_context": context.constraints.get("memory_context", context.constraints.get("experience_memory", {})),
+                    "experience_memory": context.constraints.get("experience_memory", {}),
                 },
                 default=str,
                 sort_keys=True,

@@ -5,7 +5,8 @@
     "frontend"
   ],
   "scripts": {
-    "dev": "concurrently -k -n backend,frontend -c blue,green \"npm:backend:dev\" \"npm:frontend:dev\"",
+    "dev": ".\\.venv\\Scripts\\python -m quantz.cli stack --reload-backend",
+    "dev:bridge": ".\\.venv\\Scripts\\python -m quantz.cli stack --reload-backend --with-bridge",
     "backend:dev": "powershell -ExecutionPolicy Bypass -File scripts/dev-backend.ps1",
     "frontend:dev": "npm.cmd --prefix frontend run dev",
     "frontend:build": "npm.cmd --prefix frontend run build",

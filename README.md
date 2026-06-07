@@ -110,13 +110,13 @@ PYTHONPATH=src python3 -m quantz.cli dashboard \
   --output data/experiments/run-001/dashboard.html
 ```
 
-Run the local web UI for config editing and experiment tracking:
+Run the autonomous API backend:
 
 ```bash
 PYTHONPATH=src python3 -m quantz.cli web --host 127.0.0.1 --port 8787 --root .
 ```
 
-Open `http://127.0.0.1:8787`.
+Open `http://127.0.0.1:8787/health` for the backend health check. Use the split Next.js console below for the operational UI.
 
 ## Monorepo Web App
 
@@ -132,13 +132,32 @@ npm.cmd install
 .\.venv\Scripts\python -m pip install -e .
 ```
 
-Run both services:
+Run the full local stack:
 
 ```powershell
 npm.cmd run dev
 ```
 
 Open `http://127.0.0.1:3000/control`.
+
+The Control page includes a runtime status panel for backend health, SSE state, AI key readiness, EA tick freshness, optional bridge reachability, monitor state, experience memory, vector memory, and decision audit counts.
+
+The stack command is the local process supervisor:
+
+```powershell
+.\.venv\Scripts\python -m quantz.cli stack --reload-backend
+```
+
+It starts:
+
+- autonomous FastAPI backend on `http://127.0.0.1:8787`
+- Next.js control console on `http://127.0.0.1:3000/control`
+
+To also start the Python MT5 HTTP bridge on `http://127.0.0.1:8765`:
+
+```powershell
+npm.cmd run dev:bridge
+```
 
 Run the production-shaped Docker stack:
 
@@ -166,7 +185,7 @@ export PYTHONPATH=src
 
 `configs/mt5-demo-live.json` sends orders to `http://host.docker.internal:8765` from inside the backend container. EA socket ticks still post to `http://127.0.0.1:8787/bridge/tick`.
 
-If port `8787` is already used by the legacy Python web UI, run the FastAPI backend on another port and point Next.js to it:
+If port `8787` is already used, run the autonomous FastAPI backend on another port and point Next.js to it:
 
 ```powershell
 $env:PYTHONPATH="src"

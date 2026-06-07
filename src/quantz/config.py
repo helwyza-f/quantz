@@ -39,16 +39,30 @@ class AgentSettings:
     reward_risk_ratio: float = 1.7
     position_cooldown: str = "none"
     disabled_symbols: list[str] = field(default_factory=list)
+    playbook_paths: list[str] = field(default_factory=list)
+    teacher_example_paths: list[str] = field(default_factory=list)
+    vector_memory_enabled: bool = True
+    vector_memory_path: str = "data/quantz-vector-memory.db"
+    vector_memory_context_items: int = 24
     min_closed_trades_before_demo: int = 20
     analyst: str = "none"
     llm_model: str = "gpt-5.4-mini"
     llm_api_key_env: str = "OPENAI_API_KEY"
     llm_timeout_seconds: float = 12.0
+    planner: str = "variable"
+    ai_planner_model: str = "gpt-5.4-mini"
+    ai_planner_api_key_env: str = "OPENAI_API_KEY"
+    ai_planner_timeout_seconds: float = 12.0
+    ai_planner_fail_closed: bool = True
+    decision_audit_path: str = "data/decision-audit.jsonl"
+    require_memory_for_live_ai: bool = True
+    min_live_memory_samples: int = 20
     allow_live_execution: bool = False
 
     @property
     def constraints(self) -> dict[str, Any]:
         return {
+            "mode": self.mode,
             "default_risk_percent": self.default_risk_percent,
             "min_confidence": self.min_confidence,
             "planner_min_trend_score": self.planner_min_trend_score,
@@ -57,6 +71,8 @@ class AgentSettings:
             "analyst_can_veto": self.analyst_can_veto,
             "min_sl_points": self.min_sl_points,
             "reward_risk_ratio": self.reward_risk_ratio,
+            "playbook_paths": list(self.playbook_paths),
+            "teacher_example_paths": list(self.teacher_example_paths),
         }
 
 

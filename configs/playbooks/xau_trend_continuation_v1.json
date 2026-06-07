@@ -1,0 +1,19 @@
+{
+  "name": "xau_trend_continuation_v1",
+  "description": "Initial XAUUSD trend-continuation playbook for paper training.",
+  "symbols": ["XAUUSD"],
+  "sessions": ["london", "london_new_york_overlap", "simulated_london_new_york_overlap", "new_york"],
+  "allowed_regimes": ["trend", "mixed"],
+  "entry_conditions": {
+    "trend_score_min": 0.55,
+    "volatility_min": 0.2,
+    "volatility_max": 0.8,
+    "spread_max": 90
+  },
+  "risk": {
+    "risk_percent": 0.25,
+    "sl_atr": 1.5,
+    "tp_r": 1.7
+  },
+  "status": "paper_allowed"
+}
