@@ -14,6 +14,11 @@
   "reward_risk_ratio": 1.7,
   "position_cooldown": "none",
   "disabled_symbols": [],
+  "playbook_paths": ["configs/playbooks"],
+  "teacher_example_paths": ["data/teacher_examples"],
+  "vector_memory_enabled": true,
+  "vector_memory_path": "data/quantz-vector-memory.db",
+  "vector_memory_context_items": 24,
   "min_closed_trades_before_demo": 20,
   "analyst": "rule"
 }

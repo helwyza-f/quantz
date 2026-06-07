@@ -10,7 +10,7 @@ from typing import Any
 from quantz.candidate import CandidateConfigBuilder
 from quantz.compare import RunComparator
 from quantz.config import AgentSettings, write_settings
-from quantz.memory import JsonlExperienceStore
+from quantz.memory import experience_store
 from quantz.report import ReportBuilder
 from quantz.review import ReviewEngine
 
@@ -51,7 +51,7 @@ class ExperimentRunner:
         self._run_monitor(base_run, iterations)
 
         report_builder = ReportBuilder()
-        base_report = report_builder.build(JsonlExperienceStore(paths.base_memory).read_raw(), paths.base_paper_state)
+        base_report = report_builder.build(experience_store(paths.base_memory).read_raw(), paths.base_paper_state)
         self._write_json(paths.base_report, report_builder.to_dict(base_report))
 
         review_result = ReviewEngine().review(base_report)
@@ -70,7 +70,7 @@ class ExperimentRunner:
         self._run_monitor(candidate_run, iterations)
 
         candidate_report = report_builder.build(
-            JsonlExperienceStore(paths.candidate_memory).read_raw(),
+            experience_store(paths.candidate_memory).read_raw(),
             paths.candidate_paper_state,
         )
         self._write_json(paths.candidate_report, report_builder.to_dict(candidate_report))

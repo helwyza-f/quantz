@@ -112,6 +112,21 @@ label {
   color: var(--muted);
 }
 
+.pill.ok {
+  background: #e7f6ef;
+  color: var(--good);
+}
+
+.pill.warn {
+  background: #fff4df;
+  color: var(--warn);
+}
+
+.pill.blocked {
+  background: #fdeaea;
+  color: var(--bad);
+}
+
 .grid {
   display: grid;
   gap: 14px;
@@ -119,6 +134,11 @@ label {
 
 .control-grid {
   grid-template-columns: minmax(0, 1.7fr) 420px;
+  align-items: start;
+}
+
+.replay-grid {
+  grid-template-columns: minmax(360px, 0.9fr) minmax(0, 1.3fr);
   align-items: start;
 }
 
@@ -217,6 +237,59 @@ label {
   gap: 8px;
 }
 
+.runtime-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.runtime-grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.status-line {
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 10px minmax(0, 1fr);
+  min-width: 0;
+  padding: 9px 10px;
+}
+
+.status-line span:not(.status-dot) {
+  color: var(--muted);
+  display: block;
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.status-line strong {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.status-dot {
+  border-radius: 999px;
+  display: block;
+  height: 10px;
+  width: 10px;
+}
+
+.status-dot.ok {
+  background: var(--good);
+}
+
+.status-dot.warn {
+  background: var(--warn);
+}
+
+.status-dot.blocked {
+  background: var(--bad);
+}
+
 .metric {
   border: 1px solid var(--line);
   border-radius: 7px;
@@ -265,6 +338,21 @@ label {
 
 .feedback {
   margin-top: 10px;
+}
+
+.progress-bar {
+  background: #e8eef2;
+  border-radius: 999px;
+  height: 10px;
+  margin: 12px 0;
+  overflow: hidden;
+}
+
+.progress-bar span {
+  background: var(--accent);
+  display: block;
+  height: 100%;
+  transition: width 180ms ease;
 }
 
 .decision-grid {

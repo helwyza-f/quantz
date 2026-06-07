@@ -4,22 +4,24 @@ This document is the handoff context for continuing Quantz on a Windows laptop o
 
 ## Current Architecture
 
-Quantz is a local Python backend plus server-rendered web control center for an autonomous market agent.
+Quantz is a FastAPI autonomous backend plus a Next.js operational console for an AI-first market agent.
 
 Runtime flow:
 
 ```text
-market feed -> context builder -> planner/analyst -> risk governor -> broker adapter -> experience store -> reports/web UI
+market feed -> context builder -> AI planner/analyst -> policy guard -> risk governor -> broker adapter -> experience/vector/audit memory -> operational console
 ```
 
 Important modules:
 
 - `src/quantz/cli.py`: command entrypoint.
-- `src/quantz/web.py`: local web backend and HTML UI.
+- `src/quantz/api/app.py`: FastAPI autonomous API.
+- `src/quantz/autonomous_runtime.py`: tick ingestion, sessions, SSE, control summaries.
+- `src/quantz/services.py`: agent, memory, planner, broker runtime factories.
 - `src/quantz/agent.py`: observe, decide, risk-check, execute, record loop.
 - `src/quantz/market.py`: demo, simulated, MT5, and bridge market/account feeds.
 - `src/quantz/paper.py`: paper portfolio, paper PnL, position close logic.
-- `src/quantz/planner.py`: deterministic variable-driven planner.
+- `src/quantz/planner.py`: AI decision planner, policy guard, and deterministic fallback planner.
 - `src/quantz/analyst.py`: rule-based analyst layer.
 - `src/quantz/risk.py`: deterministic risk governor.
 - `src/quantz/bridge.py`: HTTP bridge client for Windows MT5 bridge.
@@ -36,28 +38,15 @@ Important modules:
 - Monitor session state in `data/monitor-session.json`.
 - Sim market state in `data/sim-market-state.json`.
 - Learning/report/review/candidate/experiment/dashboard CLI commands.
-- Local web UI:
-  - Overview
-  - Operations monitor start/stop
-  - PnL dashboard
-  - Market chart
-  - Experiments
-  - Config editor
-- `/market` has terminal-style SVG candlestick chart with:
-  - symbol switching
-  - MA fast
-  - MA slow
-  - ATR band
-  - decision markers `B/S/H`
-  - open-position entry/SL/TP lines
-  - closed-position markers
+- Autonomous FastAPI backend on `127.0.0.1:8787`.
+- Next.js control console on `127.0.0.1:3000/control`.
+- EA socket tick ingestion through `/bridge/tick`.
+- Decision audit JSONL for AI planner requests, outputs, policy clamps, and final payloads.
 - New paper positions persist `decision_id` and `reason_codes`, so closed trades can attribute R back to the reason code that opened the trade.
 
 ## Current Limitation
 
-This is not live-ready yet.
-
-The current agent brain is still mostly deterministic and variable-driven. It has a rule-based analyst, but not a full LLM reasoning layer or visual market-reading model.
+Live execution is still gated and should start tiny. The core runtime now supports an AI decision planner, policy guard, deterministic risk governor, vector memory, and audit trail. If the AI key/model is unavailable, AI planner configs fail closed.
 
 On macOS, direct `MetaTrader5` Python integration is not expected to work reliably. Windows is the right place to validate direct MT5 access.
 
@@ -71,17 +60,30 @@ py -3.12 -m venv .venv
 .\.venv\Scripts\python -m pytest
 ```
 
-Run web UI:
+Run autonomous backend:
 
 ```powershell
 $env:PYTHONPATH="src"
 .\.venv\Scripts\python -m quantz.cli web --host 127.0.0.1 --port 8787 --root .
 ```
 
+Open backend health:
+
+```text
+http://127.0.0.1:8787/health
+```
+
+Run the Next.js console separately:
+
+```powershell
+$env:NEXT_PUBLIC_API_BASE="http://127.0.0.1:8787"
+npm.cmd --prefix frontend run dev
+```
+
 Open:
 
 ```text
-http://127.0.0.1:8787
+http://127.0.0.1:3000/control
 ```
 
 Run simulated paper monitor:
@@ -116,8 +118,8 @@ Do not use live mode until paper-mode MT5 monitoring has enough samples and the 
 
 1. Run the project on Windows and verify direct `MetaTrader5` import works.
 2. Run `run-once --market-source mt5 --mode paper` against Exness demo.
-3. Add MT5 OHLC history feed so `/market` can render real broker candles instead of only simulated candles.
-4. Extend `/market` with timeframes, candle count, and live auto-refresh controls.
+3. Attach `QuantzTickBridge` EA so `/bridge/tick` receives live ticks.
+4. Run `mt5-paper.json` with AI planner in paper mode and inspect `data/mt5-paper-decision-audit.jsonl`.
 5. Add an agent visual-review endpoint that reads `/api/market-chart` plus reason codes and produces a structured chart assessment.
 6. Add an LLM reasoning layer after the deterministic planner, but keep risk governor as the final hard gate.
 7. Add broker reconciliation for live/paper state drift.

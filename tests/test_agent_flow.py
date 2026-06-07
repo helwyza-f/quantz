@@ -3,7 +3,7 @@ from quantz.analyst import RuleBasedAnalyst
 from quantz.broker import PaperBrokerAdapter
 from quantz.market import DemoAccountFeed, DemoMarketFeed
 from quantz.memory import JsonlExperienceStore
-from quantz.models import AgentContext, DecisionStatus, TradeAction
+from quantz.models import AgentContext, AnalystOutput, DecisionStatus, TradeAction
 from quantz.paper import PaperPortfolio
 from quantz.planner import VariableDrivenPlanner
 from quantz.risk import RiskConfig, RiskGovernor
@@ -18,6 +18,20 @@ class CaptureBroker(PaperBrokerAdapter):
         return super().place_order(order)
 
 
+class CaptureAnalyst:
+    def __init__(self):
+        self.contexts = []
+
+    def analyze(self, context):
+        self.contexts.append(context)
+        return AnalystOutput(
+            market_regime="trend",
+            bias="buy",
+            reason_codes=["capture_analyst"],
+            model_version="capture_analyst_v1",
+        )
+
+
 def test_experience_store_skips_corrupt_jsonl_rows(tmp_path):
     path = tmp_path / "experience.jsonl"
     path.write_text('not-json\n{"decision":{"symbol":"XAUUSD"}}\n[1,2,3]\n', encoding="utf-8")
@@ -25,6 +39,27 @@ def test_experience_store_skips_corrupt_jsonl_rows(tmp_path):
     rows = JsonlExperienceStore(path).read_raw()
 
     assert rows == [{"decision": {"symbol": "XAUUSD"}}]
+
+
+def test_experience_store_builds_symbol_context_summary(tmp_path):
+    path = tmp_path / "experience.jsonl"
+    path.write_text(
+        "\n".join(
+            [
+                '{"context":{"market":{"symbol":"XAUUSD"}},"decision":{"symbol":"XAUUSD","action":"open_position","confidence":0.7,"reason_codes":["bullish_market_structure"],"timestamp":"t1"},"risk":{"status":"approved","reasons":["risk_checks_passed"]},"execution":{"accepted":true},"outcome":{"closed_positions":[{"r_multiple":1.7,"reason_codes":["bullish_market_structure"]}]}}',
+                '{"context":{"market":{"symbol":"XAUUSD"}},"decision":{"symbol":"XAUUSD","action":"hold","confidence":0.5,"reason_codes":["spread_too_wide"],"timestamp":"t2"},"risk":{"status":"rejected","reasons":["spread_above_limit"]},"execution":null}',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    summary = JsonlExperienceStore(path).context_summary("XAUUSD")
+
+    assert summary["sample_size"] == 2
+    assert summary["closed_trade_summary"]["average_r"] == 1.7
+    assert summary["rejection_reasons"]["spread_above_limit"] == 1
+    assert summary["reason_quality"]["bullish_market_structure"]["average_r"] == 1.7
 
 
 def test_agent_can_place_paper_trade(tmp_path):
@@ -197,3 +232,32 @@ def test_agent_records_analyst_metadata(tmp_path):
 
     assert "analyst" in record.decision.metadata
     assert record.decision.metadata["analyst"].model_version == "rule_analyst_v1"
+
+
+def test_agent_passes_experience_memory_to_analyst(tmp_path):
+    memory = JsonlExperienceStore(tmp_path / "experience.jsonl")
+    memory.path.write_text(
+        '{"context":{"market":{"symbol":"XAUUSD"}},"decision":{"symbol":"XAUUSD","action":"hold","confidence":0.5,"reason_codes":["spread_too_wide"],"timestamp":"t1"},"risk":{"status":"rejected","reasons":["spread_above_limit"]},"execution":null}\n',
+        encoding="utf-8",
+    )
+    analyst = CaptureAnalyst()
+    context = AgentContext(
+        market=DemoMarketFeed().snapshot("XAUUSD"),
+        account=DemoAccountFeed().state(),
+        constraints={"default_risk_percent": 0.25, "min_confidence": 0.65},
+    )
+    agent = TradingAgent(
+        planner=VariableDrivenPlanner(),
+        risk_governor=RiskGovernor(),
+        broker=PaperBrokerAdapter(),
+        memory=memory,
+        analyst=analyst,
+    )
+
+    agent.run_once(context)
+
+    assert analyst.contexts
+    memory_context = analyst.contexts[0].constraints["memory_context"]
+    assert memory_context["sample_size"] == 1
+    assert memory_context["rejection_focus"] == [{"reason": "spread_above_limit", "count": 1}]
+    assert analyst.contexts[0].constraints["experience_memory"] == memory_context

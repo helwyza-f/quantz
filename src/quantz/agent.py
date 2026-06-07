@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import re
 from dataclasses import replace
+from typing import Any
 
 from quantz.analyst import Analyst
 from quantz.broker import BrokerAdapter
-from quantz.memory import JsonlExperienceStore
+from quantz.memory_context import MemoryContextBuilder
 from quantz.models import AgentContext, ExperienceRecord, ExecutionResult, OrderRequest, TradeAction
 from quantz.paper import PaperPortfolio
 from quantz.planner import AgentPlanner
+from quantz.playbook import PlaybookSelector
 from quantz.risk import RiskGovernor
+from quantz.vector_memory import ExperienceVectorIndexer
 
 
 class TradingAgent:
@@ -18,9 +21,14 @@ class TradingAgent:
         planner: AgentPlanner,
         risk_governor: RiskGovernor,
         broker: BrokerAdapter,
-        memory: JsonlExperienceStore,
+        memory: Any,
         paper_portfolio: PaperPortfolio | None = None,
         analyst: Analyst | None = None,
+        playbook_selector: PlaybookSelector | None = None,
+        mode: str = "paper",
+        teacher_examples: list[dict[str, Any]] | None = None,
+        vector_memory: Any | None = None,
+        max_memory_context_items: int = 24,
     ) -> None:
         self.planner = planner
         self.risk_governor = risk_governor
@@ -28,6 +36,11 @@ class TradingAgent:
         self.memory = memory
         self.paper_portfolio = paper_portfolio
         self.analyst = analyst
+        self.playbook_selector = playbook_selector
+        self.mode = mode
+        self.teacher_examples = teacher_examples or []
+        self.vector_memory = vector_memory
+        self.max_memory_context_items = max_memory_context_items
 
     def run_once(self, context: AgentContext) -> ExperienceRecord:
         closed_positions = self.paper_portfolio.reconcile(context.market) if self.paper_portfolio else []
@@ -41,6 +54,32 @@ class TradingAgent:
                     "open_symbol_positions": self.paper_portfolio.open_count(context.market.symbol) + external_open_positions,
                 },
             )
+        memory_context = MemoryContextBuilder(
+            self.memory,
+            teacher_examples=self.teacher_examples,
+            vector_store=self.vector_memory,
+            max_context_items=self.max_memory_context_items,
+        ).build(context)
+        context_with_memory = replace(
+            context,
+            constraints={
+                **context.constraints,
+                "memory_context": memory_context,
+                "experience_memory": memory_context,
+            },
+        )
+        playbook_context = self.playbook_selector.select(context_with_memory, self.mode).to_context() if self.playbook_selector else {
+            "selected": None,
+            "status": "not_configured",
+            "reasons": ["no_playbook_selector"],
+        }
+        context = replace(
+            context_with_memory,
+            constraints={
+                **context_with_memory.constraints,
+                "playbook": playbook_context,
+            },
+        )
         if self.analyst:
             analysis = self.analyst.analyze(context)
             context = replace(context, constraints={**context.constraints, "analyst": analysis})
@@ -74,7 +113,16 @@ class TradingAgent:
         outcome = {"closed_positions": closed_positions} if closed_positions else None
         record = ExperienceRecord(context=context, decision=decision, risk=risk, execution=execution, outcome=outcome)
         self.memory.append(record)
+        self._index_semantic_memory(record)
         return record
+
+    def _index_semantic_memory(self, record: ExperienceRecord) -> None:
+        if not self.vector_memory:
+            return
+        try:
+            ExperienceVectorIndexer(self.vector_memory).append_record(record)
+        except Exception:
+            return
 
 
 def safe_order_comment(decision_id: str) -> str:

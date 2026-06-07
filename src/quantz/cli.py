@@ -5,6 +5,7 @@ import json
 import time
 from dataclasses import asdict, is_dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from quantz.agent import TradingAgent
@@ -26,14 +27,24 @@ from quantz.market import (
     Mt5MarketFeed,
     SimulatedMarketFeed,
 )
-from quantz.memory import JsonlExperienceStore
+from quantz.memory import experience_store
 from quantz.models import AgentContext
 from quantz.paper import PaperPortfolio
-from quantz.planner import VariableDrivenPlanner
+from quantz.audit import DecisionAuditStore
+from quantz.planner import AIDecisionPlanner, DecisionPolicy, VariableDrivenPlanner
+from quantz.playbook import PlaybookLoader, PlaybookSelector
 from quantz.report import ReportBuilder
+from quantz.replay import ReplayRunner
+from quantz.promotion import PromotionGateEvaluator
 from quantz.review import ReviewEngine
 from quantz.risk import RiskConfig, RiskGovernor
-from quantz.web import serve
+from quantz.services import AgentRuntimeService
+from quantz.stack import StackConfig, run_stack
+from quantz.teacher import TeacherExampleStore
+from quantz.vector_memory import LocalSQLiteVectorMemoryStore
+from quantz.agent_goal import AgentGoal
+from quantz.agent_tools import TrainingToolFactory
+from quantz.orchestrator import LLMTrainingBrain, TrainingOrchestrator
 
 
 def main() -> None:
@@ -70,6 +81,14 @@ def main() -> None:
     learn = subparsers.add_parser("learn")
     learn.add_argument("--memory-path", default="data/experience.jsonl")
 
+    import_memory = subparsers.add_parser("import-memory")
+    import_memory.add_argument("--jsonl-path", required=True)
+    import_memory.add_argument("--sqlite-path", default="data/quantz-memory.db")
+
+    inspect_decision = subparsers.add_parser("inspect-decision")
+    inspect_decision.add_argument("--memory-path", default="data/quantz-memory.db")
+    inspect_decision.add_argument("--decision-id", required=True)
+
     report = subparsers.add_parser("report")
     report.add_argument("--memory-path", default="data/experience.jsonl")
     report.add_argument("--paper-state-path", default="data/paper-state.json")
@@ -99,10 +118,47 @@ def main() -> None:
     dashboard.add_argument("--experiment-dir", required=True)
     dashboard.add_argument("--output", required=True)
 
+    replay = subparsers.add_parser("replay")
+    replay.add_argument("--config", required=True)
+    replay.add_argument("--symbol", required=True)
+    replay.add_argument("--csv", required=True)
+
+    backtest = subparsers.add_parser("backtest")
+    backtest.add_argument("--config", required=True)
+    backtest.add_argument("--symbol", required=True)
+    backtest.add_argument("--csv", required=True)
+    backtest.add_argument("--output-dir", required=True)
+    backtest.add_argument("--promotion-stage", default="replay_to_paper", choices=["replay_to_paper", "paper_to_demo", "demo_to_tiny_live"])
+
+    promotion_gate = subparsers.add_parser("promotion-gate")
+    promotion_gate.add_argument("--stage", required=True, choices=["replay_to_paper", "paper_to_demo", "demo_to_tiny_live"])
+    promotion_gate.add_argument("--memory-path", default="data/experience.jsonl")
+    promotion_gate.add_argument("--paper-state-path", default="data/paper-state.json")
+
+    train_agent = subparsers.add_parser("train-agent")
+    train_agent.add_argument("--config", required=True)
+    train_agent.add_argument("--symbol", required=True)
+    train_agent.add_argument("--csv", required=True)
+    train_agent.add_argument("--playbook-path", required=True)
+    train_agent.add_argument("--output-dir", required=True)
+    train_agent.add_argument("--stage", default="replay_to_paper", choices=["replay_to_paper", "paper_to_demo", "demo_to_tiny_live"])
+    train_agent.add_argument("--max-steps", type=int, default=4)
+    train_agent.add_argument("--brain", choices=["rule", "llm"], default="rule")
+
     web = subparsers.add_parser("web")
     web.add_argument("--host", default="127.0.0.1")
     web.add_argument("--port", type=int, default=8787)
     web.add_argument("--root", default=".")
+
+    stack = subparsers.add_parser("stack")
+    stack.add_argument("--host", default="127.0.0.1")
+    stack.add_argument("--backend-port", type=int, default=8787)
+    stack.add_argument("--frontend-port", type=int, default=3000)
+    stack.add_argument("--bridge-port", type=int, default=8765)
+    stack.add_argument("--root", default=".")
+    stack.add_argument("--no-frontend", action="store_true")
+    stack.add_argument("--with-bridge", action="store_true")
+    stack.add_argument("--reload-backend", action="store_true")
 
     args = parser.parse_args()
     if args.command == "run-once":
@@ -113,22 +169,32 @@ def main() -> None:
         )
         print(json.dumps(record, default=_json_default, indent=2, sort_keys=True))
     elif args.command == "learn":
-        report = ExperienceLearner().analyze(JsonlExperienceStore(args.memory_path).read_raw())
+        report = ExperienceLearner().analyze(experience_store(args.memory_path).read_raw())
         print(json.dumps(report, default=_json_default, indent=2, sort_keys=True))
+    elif args.command == "import-memory":
+        from quantz.memory_sqlite import SQLiteExperienceStore
+
+        imported = SQLiteExperienceStore(args.sqlite_path).import_jsonl(args.jsonl_path)
+        print(json.dumps({"imported": imported, "sqlite_path": args.sqlite_path}, indent=2, sort_keys=True))
+    elif args.command == "inspect-decision":
+        store = experience_store(args.memory_path)
+        if not hasattr(store, "decision_lifecycle"):
+            raise ValueError("inspect-decision requires a SQLite memory path")
+        print(json.dumps(store.decision_lifecycle(args.decision_id), default=_json_default, indent=2, sort_keys=True))
     elif args.command == "monitor":
         settings = _settings(args)
         _monitor(settings, args.max_iterations)
     elif args.command == "report":
         builder = ReportBuilder()
         session_report = builder.build(
-            JsonlExperienceStore(args.memory_path).read_raw(),
+            experience_store(args.memory_path).read_raw(),
             args.paper_state_path,
         )
         print(json.dumps(builder.to_dict(session_report), default=_json_default, indent=2, sort_keys=True))
     elif args.command == "review":
         builder = ReportBuilder()
         session_report = builder.build(
-            JsonlExperienceStore(args.memory_path).read_raw(),
+            experience_store(args.memory_path).read_raw(),
             args.paper_state_path,
         )
         review_result = ReviewEngine().review(session_report)
@@ -136,7 +202,7 @@ def main() -> None:
     elif args.command == "propose-config":
         report_builder = ReportBuilder()
         session_report = report_builder.build(
-            JsonlExperienceStore(args.memory_path).read_raw(),
+            experience_store(args.memory_path).read_raw(),
             args.paper_state_path,
         )
         review_result = ReviewEngine().review(session_report)
@@ -146,11 +212,11 @@ def main() -> None:
     elif args.command == "compare-runs":
         builder = ReportBuilder()
         base_report = builder.build(
-            JsonlExperienceStore(args.base_memory_path).read_raw(),
+            experience_store(args.base_memory_path).read_raw(),
             args.base_paper_state_path,
         )
         candidate_report = builder.build(
-            JsonlExperienceStore(args.candidate_memory_path).read_raw(),
+            experience_store(args.candidate_memory_path).read_raw(),
             args.candidate_paper_state_path,
         )
         comparison = RunComparator().compare(base_report, candidate_report)
@@ -165,8 +231,61 @@ def main() -> None:
     elif args.command == "dashboard":
         output = DashboardRenderer().render_experiment(args.experiment_dir, args.output)
         print(json.dumps({"output": str(output)}, indent=2, sort_keys=True))
+    elif args.command == "replay":
+        settings = merge_settings(load_settings(args.config), mode="paper")
+        agent = _agent(settings, BridgeClient(settings.bridge_url))
+        summary = ReplayRunner(agent).run_csv(args.symbol, args.csv, constraints=settings.constraints)
+        print(json.dumps(asdict(summary), indent=2, sort_keys=True))
+    elif args.command == "backtest":
+        summary = _backtest(args)
+        print(json.dumps(summary, default=_json_default, indent=2, sort_keys=True))
+    elif args.command == "promotion-gate":
+        builder = ReportBuilder()
+        session_report = builder.build(experience_store(args.memory_path).read_raw(), args.paper_state_path)
+        gate = PromotionGateEvaluator().evaluate(session_report, args.stage)
+        print(json.dumps(gate.to_dict(), default=_json_default, indent=2, sort_keys=True))
+    elif args.command == "train-agent":
+        goal = AgentGoal(
+            objective=f"Improve {args.symbol} playbook until {args.stage} gate passes",
+            symbol=args.symbol,
+            playbook=Path(args.playbook_path).stem,
+            stage=args.stage,
+            allowed_tools=["run_backtest", "inspect_report", "evaluate_promotion_gate", "propose_playbook_adjustment"],
+            max_steps=args.max_steps,
+        )
+        output_dir = Path(args.output_dir)
+        state = {
+            "config": args.config,
+            "csv": args.csv,
+            "playbook_path": args.playbook_path,
+            "output_dir": str(output_dir),
+        }
+        brain = LLMTrainingBrain() if args.brain == "llm" else None
+        orchestrator = TrainingOrchestrator(goal, TrainingToolFactory(".").registry(), brain=brain, state=state)
+        payload = orchestrator.run()
+        run_path = orchestrator.write_run(output_dir / "agent-run.json", payload)
+        print(json.dumps({"run_path": str(run_path), **payload}, default=_json_default, indent=2, sort_keys=True))
     elif args.command == "web":
-        serve(args.host, args.port, args.root, monitor_fn=_monitor)
+        import uvicorn
+
+        from quantz.api.app import create_app
+
+        uvicorn.run(create_app(args.root), host=args.host, port=args.port)
+    elif args.command == "stack":
+        raise SystemExit(
+            run_stack(
+                StackConfig(
+                    root=Path(args.root),
+                    host=args.host,
+                    backend_port=args.backend_port,
+                    frontend_port=args.frontend_port,
+                    bridge_port=args.bridge_port,
+                    with_frontend=not args.no_frontend,
+                    with_bridge=args.with_bridge,
+                    reload_backend=args.reload_backend,
+                )
+            )
+        )
 
 
 def _run_once(
@@ -185,6 +304,51 @@ def _run_once(
         constraints=settings.constraints,
     )
     return agent.run_once(context)
+
+
+def _backtest(args: Any) -> dict[str, Any]:
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    memory_path = output_dir / "experience.jsonl"
+    paper_state_path = output_dir / "paper-state.json"
+    sim_state_path = output_dir / "sim-market-state.json"
+    report_path = output_dir / "report.json"
+    gate_path = output_dir / "promotion-gate.json"
+
+    settings = merge_settings(
+        load_settings(args.config),
+        mode="paper",
+        memory_path=str(memory_path),
+        paper_state_path=str(paper_state_path),
+        sim_state_path=str(sim_state_path),
+        vector_memory_path=str(output_dir / "vector-memory.db"),
+    )
+    agent = _agent(settings, BridgeClient(settings.bridge_url))
+    replay_summary = ReplayRunner(agent).run_csv(args.symbol, args.csv, constraints=settings.constraints)
+
+    report_builder = ReportBuilder()
+    report = report_builder.build(experience_store(memory_path).read_raw(), paper_state_path)
+    report_payload = report_builder.to_dict(report)
+    gate = PromotionGateEvaluator().evaluate(report, args.promotion_stage)
+    gate_payload = gate.to_dict()
+
+    with report_path.open("w", encoding="utf-8") as handle:
+        json.dump(report_payload, handle, indent=2, sort_keys=True)
+    with gate_path.open("w", encoding="utf-8") as handle:
+        json.dump(gate_payload, handle, indent=2, sort_keys=True)
+
+    return {
+        "output_dir": str(output_dir),
+        "replay": asdict(replay_summary),
+        "report": report_payload,
+        "promotion_gate": gate_payload,
+        "paths": {
+            "memory": str(memory_path),
+            "paper_state": str(paper_state_path),
+            "report": str(report_path),
+            "promotion_gate": str(gate_path),
+        },
+    }
 
 
 def _monitor(
@@ -267,14 +431,29 @@ def _monitor(
 
 
 def _agent(settings: AgentSettings, bridge_client: BridgeClient) -> TradingAgent:
-    return TradingAgent(
-        planner=VariableDrivenPlanner(),
-        risk_governor=RiskGovernor(_risk_config(settings)),
-        broker=_broker(settings.mode, settings.execution_source, bridge_client),
-        memory=JsonlExperienceStore(settings.memory_path),
-        paper_portfolio=PaperPortfolio(settings.paper_state_path) if settings.mode == "paper" else None,
-        analyst=_analyst(settings),
-    )
+    return AgentRuntimeService(settings, bridge_client).build_agent()
+
+
+def _planner(settings: AgentSettings) -> Any:
+    if settings.planner == "variable":
+        return VariableDrivenPlanner()
+    if settings.planner == "ai":
+        return AIDecisionPlanner(
+            model=settings.ai_planner_model,
+            api_key_env=settings.ai_planner_api_key_env,
+            timeout_seconds=settings.ai_planner_timeout_seconds,
+            fallback=VariableDrivenPlanner(),
+            policy=DecisionPolicy(
+                min_confidence=settings.min_confidence,
+                max_risk_percent=settings.risk_max_risk_per_trade_percent,
+                max_spread_points=settings.risk_max_spread_points,
+                require_memory_for_live=settings.require_memory_for_live_ai,
+                min_live_memory_samples=settings.min_live_memory_samples,
+                fail_closed_on_ai_error=settings.ai_planner_fail_closed,
+            ),
+            audit_store=DecisionAuditStore(settings.decision_audit_path),
+        )
+    raise ValueError(f"Unknown planner: {settings.planner}")
 
 
 def _risk_config(settings: AgentSettings) -> RiskConfig:
@@ -323,6 +502,32 @@ def _analyst(settings: AgentSettings) -> Any:
     if name == "noop":
         return NoOpAnalyst()
     raise ValueError(f"Unknown analyst: {name}")
+
+
+def _playbook_selector(settings: AgentSettings) -> PlaybookSelector | None:
+    if not settings.playbook_paths:
+        return None
+    return PlaybookSelector(PlaybookLoader().load_many(settings.playbook_paths))
+
+
+def _teacher_examples(settings: AgentSettings) -> list[dict[str, Any]]:
+    if not settings.teacher_example_paths:
+        return []
+    examples = TeacherExampleStore(settings.teacher_example_paths).load()
+    return [example.to_dict() for example in examples]
+
+
+def _vector_memory(settings: AgentSettings) -> Any | None:
+    if not settings.vector_memory_enabled:
+        return None
+    default_settings = AgentSettings()
+    vector_path = Path(settings.vector_memory_path)
+    if (
+        settings.vector_memory_path == default_settings.vector_memory_path
+        and settings.memory_path != default_settings.memory_path
+    ):
+        vector_path = Path(settings.memory_path).with_name("vector-memory.db")
+    return LocalSQLiteVectorMemoryStore(vector_path)
 
 
 def _feeds(market_source: str, bridge_client: BridgeClient) -> tuple[Any, Any]:

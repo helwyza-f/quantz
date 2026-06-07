@@ -24,6 +24,8 @@ That package is normally used on Windows with the MT5 terminal installed and log
 
 Use this when the Windows laptop will run both Quantz and MT5.
 
+For the chart EA tick bridge, also follow [mt5-ea-bridge-setup.md](mt5-ea-bridge-setup.md).
+
 1. Install Python 3.11 or 3.12 on Windows.
 2. Install MetaTrader 5.
 3. Log in to the Exness MT5 account in the terminal.

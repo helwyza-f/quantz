@@ -20,6 +20,14 @@
   "mode": "live",
   "paper_start_equity": 10000,
   "paper_state_path": "data/mt5-demo-live-paper-state.json",
+  "planner": "ai",
+  "ai_planner_model": "gpt-5.4-mini",
+  "ai_planner_api_key_env": "OPENAI_API_KEY",
+  "ai_planner_timeout_seconds": 12,
+  "ai_planner_fail_closed": true,
+  "decision_audit_path": "data/mt5-demo-live-decision-audit.jsonl",
+  "require_memory_for_live_ai": true,
+  "min_live_memory_samples": 20,
   "planner_max_spread_points": 250,
   "planner_min_trend_score": 0.35,
   "position_cooldown": "none",
@@ -31,6 +39,9 @@
   "risk_max_spread_points": 250,
   "risk_min_lot": 0.01,
   "sim_state_path": "data/mt5-demo-live-sim-market-state.json",
+  "vector_memory_enabled": true,
+  "vector_memory_path": "data/mt5-demo-live-vector-memory.db",
+  "vector_memory_context_items": 24,
   "symbols": [
     "XAUUSD"
   ]

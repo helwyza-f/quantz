@@ -14,6 +14,7 @@ type ControlPayload = {
   ticks?: Dict[];
   stream?: Dict;
   settings?: AppSettings;
+  runtime?: Dict;
 };
 
 type AppSettings = {
@@ -98,6 +99,7 @@ function ControlDashboardInner() {
   const agent = payload?.agent || {};
   const monitor = (agent.monitor || {}) as Dict;
   const latest = (agent.latest_decision || {}) as Dict;
+  const runtime = payload?.runtime || {};
   const settings = settingsQuery.data || payload?.settings || {};
   const chart = useMemo(() => (payload?.chart || {}) as Dict, [payload?.chart]);
   const selectedSymbol = ((chart.symbols as string[] | undefined) || ["XAUUSD"])[0] || "XAUUSD";
@@ -247,6 +249,8 @@ function ControlDashboardInner() {
         </div>
 
         <aside className="grid">
+          <RuntimeStatusPanel runtime={runtime} status={status} />
+
           <SettingsPanel
             settings={settings}
             loading={settingsQuery.isLoading}
@@ -314,6 +318,73 @@ function ControlDashboardInner() {
       </section>
     </main>
   );
+}
+
+function RuntimeStatusPanel({ runtime, status }: { runtime: Dict; status: string }) {
+  const backend = (runtime.backend || {}) as Dict;
+  const agent = (runtime.agent || {}) as Dict;
+  const ai = (runtime.ai || {}) as Dict;
+  const market = (runtime.market || {}) as Dict;
+  const memory = (runtime.memory || {}) as Dict;
+  const bridge = (runtime.bridge || {}) as Dict;
+  const monitor = (runtime.monitor || {}) as Dict;
+  const overall = String(runtime.overall || "unknown");
+  return (
+    <section className="panel runtime-panel">
+      <div className="panel-title-row">
+        <h2>Runtime</h2>
+        <span className={`pill compact ${overallClass(overall)}`}>{labelForOverall(overall)}</span>
+      </div>
+      <div className="runtime-grid">
+        <StatusLine label="Backend" value={String(backend.status || "unknown")} state={String(backend.status || "unknown")} />
+        <StatusLine label="SSE" value={status} state={status === "sse live" ? "ok" : "warn"} />
+        <StatusLine label="AI Key" value={ai.api_key_set ? "set" : "missing"} state={ai.api_key_set ? "ok" : "blocked"} />
+        <StatusLine label="EA Tick" value={market.ea_tick_active ? `${value(market.latest_tick_age_seconds)}s` : "waiting"} state={market.ea_tick_active ? "ok" : "warn"} />
+        <StatusLine label="Bridge" value={bridge.expected ? (bridge.reachable ? "reachable" : "offline") : "not required"} state={!bridge.expected || bridge.reachable ? "ok" : "warn"} />
+        <StatusLine label="Monitor" value={String(monitor.status || "stopped")} state={monitor.status === "error" ? "blocked" : "ok"} />
+      </div>
+      <MetricStrip
+        items={[
+          ["Config", String(agent.config || "")],
+          ["Planner", String(agent.planner || "")],
+          ["Mode", String(agent.mode || "")],
+          ["Market", String(market.source || "")],
+          ["Experience", value(memory.experience_count)],
+          ["Vector", `${value(memory.vector_count)} ${memory.vector_enabled ? "on" : "off"}`],
+          ["Audit", value(memory.audit_count_recent)],
+          ["TPM", value(market.ticks_per_minute)],
+        ]}
+      />
+    </section>
+  );
+}
+
+function StatusLine({ label, value: item, state }: { label: string; value: string; state: string }) {
+  return (
+    <div className="status-line">
+      <span className={`status-dot ${statusClass(state)}`} />
+      <div>
+        <span>{label}</span>
+        <strong>{item}</strong>
+      </div>
+    </div>
+  );
+}
+
+function statusClass(state: string): string {
+  if (["ok", "running", "sse live", "set", "reachable"].includes(state)) return "ok";
+  if (["blocked", "error", "missing"].includes(state)) return "blocked";
+  return "warn";
+}
+
+function overallClass(overall: string): string {
+  if (overall === "ready") return "ok";
+  if (overall.includes("missing") || overall.includes("error")) return "blocked";
+  return "warn";
+}
+
+function labelForOverall(overall: string): string {
+  return overall.replaceAll("_", " ");
 }
 
 function SettingsPanel({
